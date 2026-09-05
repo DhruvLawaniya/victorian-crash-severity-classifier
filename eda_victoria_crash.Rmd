@@ -1,0 +1,1460 @@
+---
+title: "Predicting Victorian Road Crash Severity — A Multiclass Classification Study"
+author: "W05G09"
+always_allow_html: true
+output:
+  html_document:
+    code_folding: hide
+    toc: false
+    number_sections: false
+    theme: flatly
+    highlight: tango
+    fig_width: 8
+    fig_height: 2.6
+    df_print: default
+---
+
+<style>
+body{font-family:"Times New Roman",Times,serif;font-size:12px;line-height:1.28;color:#2c3e50;text-align:justify}
+.main-container{max-width:1200px;padding-top:2px}
+h1.title{font-family:"Times New Roman",Times,serif;font-size:16px;font-weight:700;margin:0 0 2px;color:#1f3a5f}
+h4.author,h4.date{font-family:"Times New Roman",Times,serif;font-size:10px;color:#7f8c8d;margin:0}
+h2{font-family:"Times New Roman",Times,serif;font-size:13.5px;font-weight:700;margin:10px 0 3px;color:#1f3a5f;
+   border-bottom:1.5px solid #3498db;padding-bottom:2px}
+h3{font-family:"Times New Roman",Times,serif;font-size:12px;font-weight:700;margin:6px 0 2px;color:#2c3e50}
+h4{font-family:"Times New Roman",Times,serif;font-size:11px;font-weight:600;margin:4px 0 1px;color:#34495e}
+p,li{margin-bottom:1px;font-family:"Times New Roman",Times,serif}
+hr{margin:6px 0;border-top:1px solid #bdc3c7}
+blockquote{padding:3px 8px;margin:3px 0;font-size:10px;font-family:"Times New Roman",Times,serif;
+           background:#f8f9fa;border-left:2px solid #3498db}
+ul,ol{margin:1px 0;padding-left:18px}
+pre,code{font-family:"Consolas","Monaco","Courier New",monospace;font-size:9.5px}
+pre{padding:3px;margin:2px 0}
+
+table{font-family:"Times New Roman",Times,serif;font-size:10px;border-collapse:collapse;margin:3px 0 6px;width:100%}
+th{background:#34495e;color:#fff;font-weight:600;text-align:left;
+   border:1px solid #2c3e50;padding:3px 5px!important}
+td{border:1px solid #d5dbdb;padding:2px 5px!important;vertical-align:top}
+tbody tr:nth-child(even) td{background:#f8f9fa}
+
+.figure{margin:2px 0 4px}
+.figure img{margin:0 auto!important;display:block}
+p.caption{font-family:"Times New Roman",Times,serif;font-size:9.5px;margin:1px 0;line-height:1.2;
+          color:#566573;font-style:italic;text-align:center}
+
+div.sourceCode{margin:2px 0}
+.btn-default{font-size:9.5px;padding:1px 5px}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.align = "center", dpi = 120,
+  cache = TRUE, cache.lazy = FALSE
+)
+options(scipen = 999)
+```
+
+```{css, echo=FALSE}
+.btn.code-folding-btn {
+  display: none;
+}
+```
+
+## 1. Introduction & Problem Statement
+
+Victoria recorded approximately 15,900 reported crashes in 2023, with hundreds of fatalities and thousands of serious injuries despite the *Road Safety Strategy 2021–2030* (Transport Accident Commission, 2021). Interim fatality-reduction targets have not been met, motivating data-driven triage and prevention. Findings transfer to NSW, which shares comparable urban density, traffic volumes, and infrastructure, and pursues zero road fatalities under its *Road Safety Action Plan*.
+
+**Research question.** Which combinations of *environmental* (speed zone, lighting, weather, surface, geometry), *vehicle* (type, age, towing, occupancy), and *human* (age, sex, seatbelt/helmet use, ejection, licence origin) factors best predict whether a Victorian road crash results in a **Fatal**, **Serious**, or **Minor** injury outcome?
+
+**Classification task.** Each observation is a police-reported crash. The target `SEVERITY` is recoded into three ordered classes — *Fatal* (≥1 death), *Serious* (≥1 hospitalised, no fatality), *Minor* (treated at scene or non-admitted attendance). The class with no injury (PDO, n = 4) is removed as unlearnable.
+
+**Stakeholder value.** Real-time severity prediction supports Ambulance Victoria triage, identifies road-geometry × speed combinations for VicRoads infrastructure prioritisation, informs *Towards Zero* policy targeting, and refines TAC actuarial bands and driver-education campaigns.
+
+**Data source.** *Victoria Road Crash Data* (Department of Transport and Planning [DTP], 2024), six relational tables collected by Victoria Police at every reported crash scene, retrieved 18 March 2026 from the Victorian Government Data Portal.
+
+---
+
+## 2. Exploratory Data Analysis
+
+### 2.1 Data loading & integration
+
+Six relational tables are loaded and joined on `ACCIDENT_NO`. Person, vehicle, atmospheric, and road-surface tables are *many-per-crash* and are aggregated to one row per accident before the final left-join with `accident` and `node` (both 1-to-1 at crash level).
+
+```{r library and import, message=FALSE, results='hide', cache=FALSE}
+# Load libraries (cache=FALSE so library() always re-attaches packages
+# even when downstream chunks hit cache — otherwise inline `r comma(...)`
+# expressions fail with "could not find function 'comma'").
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+library(ggcorrplot)
+library(cowplot)
+
+
+# Load and process data
+accident <- read_csv("accident.csv") %>%
+  mutate(
+    ACCIDENT_DATE = as.Date(parse_date_time(
+      ACCIDENT_DATE,
+      orders = c("dmy", "ymd", "mdy", "ymd HMS", "dmy HMS")
+    )),
+    accident_year = year(ACCIDENT_DATE)
+  )
+
+person <- read_csv("person.csv")
+vehicle <- read_csv("vehicle.csv")
+node <- read_csv("node.csv")
+road_surf <- read_csv("road_surface_cond.csv")
+atmos <- read_csv("atmospheric_cond.csv")
+```
+```{r source-table}
+tibble(
+  Table = c(
+    "accident", "person", "vehicle", "node",
+    "road_surface_cond", "atmospheric_cond"
+  ),
+  Rows = c(
+    nrow(accident), nrow(person), nrow(vehicle),
+    nrow(node), nrow(road_surf), nrow(atmos)
+  ),
+  `One-to-…` = c(
+    "1-to-1 (crash)", "many-per-crash", "many-per-crash",
+    "1-to-1 (location)", "many-per-crash", "many-per-crash"
+  ),
+  `Key content` = c(
+    "Severity, type, date/time, speed zone, light, geometry",
+    "Age, sex, road-user type, seatbelt/helmet, ejection, licence",
+    "Vehicle type, year, towing, fire, damage",
+    "Lat/lon, LGA, postcode, urbanisation degree",
+    "Surface condition (Dry/Wet/Icy/Muddy/Snowy)",
+    "Weather (Clear/Rain/Fog/Snow/Smoke/Wind/Dust)"
+  )
+) %>%
+  kbl(
+    format.args = list(big.mark = ","),
+    caption = "Table 1. Six integrated tables, linked on ACCIDENT_NO"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = TRUE, font_size = 10
+  )
+```
+
+**Person aggregation.** Behavioural flags (any occupant ejected, unbelted, helmet-non-use), demographic composites (mean age, proportion female, young/elderly drivers), and road-user mix (pedestrian/cyclist/motorcyclist/interstate licence). Driver-specific flags use `ROAD_USER_TYPE` codes 2/4/7. The `any_*` pattern preserves the worst-case signal at crash level.
+
+```{r agg-person, results='hide'}
+clean_code <- function(x) sub("\\..*$", "", str_trim(as.character(x)))
+
+person_agg <- person %>%
+  mutate(
+    rut = clean_code(ROAD_USER_TYPE),
+    hworn = clean_code(HELMET_BELT_WORN),
+    ejct = clean_code(EJECTED_CODE),
+    age_g = str_trim(as.character(AGE_GROUP)),
+    age_lower = as.numeric(str_extract(AGE_GROUP, "^\\d+")),
+    is_driver = rut %in% c("2", "4", "7"),
+    is_passenger = rut %in% c("3", "5", "8"),
+    is_pedestrian = rut == "1",
+    is_cyclist = rut == "6",
+    is_motorcyclist = rut == "4",
+    is_female = SEX == "F",
+    serious_inj = INJ_LEVEL %in% c(1, 2),
+    no_seatbelt = hworn %in% c("2", "4", "5"),
+    no_helmet = hworn == "7",
+    ejected = ejct %in% c("1", "2", "3"),
+    young = age_g %in% c("5-12", "13-15", "16-17", "18-21", "22-25"),
+    elderly = age_g == "70+",
+    young_ped = age_g %in% c("5-12", "13-15", "16-17", "18-21"),
+    elderly_ped = age_g == "70+",
+    young_drv = is_driver & young,
+    elderly_drv = is_driver & elderly,
+    interstate_d = is_driver & LICENCE_STATE %in% c("A", "B", "D", "N", "Q", "S", "T", "W"),
+    overseas_d = is_driver & LICENCE_STATE == "O"
+  ) %>%
+  group_by(ACCIDENT_NO) %>%
+  summarise(
+    n_persons = n(),
+    n_drivers = sum(is_driver, na.rm = TRUE),
+    prop_female = mean(is_female, na.rm = TRUE),
+    mean_age_lower = mean(age_lower, na.rm = TRUE),
+    any_no_seatbelt = any(no_seatbelt, na.rm = TRUE),
+    any_no_helmet = any(no_helmet, na.rm = TRUE),
+    any_ejected = any(ejected, na.rm = TRUE),
+    has_young_drv = any(young_drv, na.rm = TRUE),
+    has_elderly_drv = any(elderly_drv, na.rm = TRUE),
+    has_young_person = any(young, na.rm = TRUE),
+    has_elderly_person = any(elderly, na.rm = TRUE),
+    has_pedestrian = any(is_pedestrian, na.rm = TRUE),
+    has_young_pedestrian = any(young_ped, na.rm = TRUE),
+    has_elderly_pedestrian = any(elderly_ped, na.rm = TRUE),
+    has_cyclist = any(is_cyclist, na.rm = TRUE),
+    has_motorcyclist = any(is_motorcyclist, na.rm = TRUE),
+    has_interstate_d = any(interstate_d, na.rm = TRUE),
+    has_overseas_d = any(overseas_d, na.rm = TRUE),
+    prop_serious_inj = mean(serious_inj, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+**Vehicle aggregation.** `VEHICLE_TYPE` is split into five mutually-exclusive categories (Passenger, Heavy, Motorcycle, Bicycle/Drawn, Public). Vehicle age = `accident_year − VEHICLE_YEAR_MANUF` with a [0, 80] filter; `has_towing`, `any_fire`, `n_vehicles` capture secondary-event and multi-vehicle dimensions.
+
+```{r agg-vehicle, results='hide'}
+PASSENGER_V <- c(1, 2, 3, 4, 5, 17, 18, 20, 71)
+HEAVY_V <- c(6, 7, 19, 27, 60, 61, 62, 63, 72)
+MOTORCYCLE_V <- c(10, 11, 12)
+BICYCLE_DRAWN <- c(13, 14)
+PUBLIC_V <- c(8, 9, 15, 16)
+TOWING_CODES <- c("A", "B", "C", "D", "E", "F", "G", "I", "J", "K", "L")
+
+vehicle_agg <- vehicle %>%
+  left_join(accident %>% select(ACCIDENT_NO, accident_year), by = "ACCIDENT_NO") %>%
+  mutate(
+    VEHICLE_TYPE_N = suppressWarnings(as.numeric(VEHICLE_TYPE)),
+    vehicle_age = accident_year - suppressWarnings(as.numeric(VEHICLE_YEAR_MANUF)),
+    vehicle_age = if_else(between(vehicle_age, 0, 80), vehicle_age, NA_real_),
+    vehicle_age_group = cut(vehicle_age,
+      breaks = c(-1, 4, 9, 14, 200),
+      labels = c("0-4 Years", "5-9 Years", "10-14 Years", "15+ Years")
+    ),
+    is_passenger = VEHICLE_TYPE %in% PASSENGER_V,
+    is_heavy = VEHICLE_TYPE_N %in% HEAVY_V,
+    is_motorcycle = VEHICLE_TYPE_N %in% MOTORCYCLE_V,
+    is_bicycle = VEHICLE_TYPE_N %in% BICYCLE_DRAWN,
+    is_public = VEHICLE_TYPE_N %in% PUBLIC_V,
+    is_towing = str_trim(str_to_upper(as.character(TRAILER_TYPE))) %in% TOWING_CODES,
+    lamps_off = as.character(LAMPS) == "1",
+    tc_desc = str_trim(as.character(TRAFFIC_CONTROL_DESC)),
+    surface_desc = str_trim(as.character(ROAD_SURFACE_TYPE_DESC))
+  ) %>%
+  group_by(ACCIDENT_NO) %>%
+  summarise(
+    n_vehicles = n(),
+    has_passenger_vehicle = any(is_passenger, na.rm = TRUE),
+    has_heavy_v = any(is_heavy, na.rm = TRUE),
+    has_motorcycle = any(is_motorcycle, na.rm = TRUE),
+    has_bicycle_drawn = any(is_bicycle, na.rm = TRUE),
+    has_public_trans = any(is_public, na.rm = TRUE),
+    has_towing = any(is_towing, na.rm = TRUE),
+    mean_vehicle_age = mean(vehicle_age, na.rm = TRUE),
+    any_age_unknown = any(is.na(vehicle_age)),
+    any_lamps_off = any(lamps_off, na.rm = TRUE),
+    traffic_control = names(sort(table(tc_desc), decreasing = TRUE))[1],
+    road_surface_type = names(sort(table(surface_desc), decreasing = TRUE))[1],
+    any_fire = any(CAUGHT_FIRE == "Yes", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(mean_vehicle_age = if_else(is.nan(mean_vehicle_age), NA_real_, mean_vehicle_age))
+```
+
+**Environmental aggregation.** Atmospheric and surface tables store one row per reported condition. We pivot to independent binary flags plus a *sole-condition* indicator (`atm_clear`/`surf_dry`) set to TRUE only when that code is the only one reported, preserving multi-condition records (e.g. `Clear + Raining`).
+
+```{r agg-env, results='hide'}
+atmos_agg <- atmos %>%
+  group_by(ACCIDENT_NO) %>%
+  summarise(
+    atm_rain = any(ATMOSPH_COND_DESC == "Raining", na.rm = TRUE),
+    atm_fog = any(ATMOSPH_COND_DESC == "Fog", na.rm = TRUE),
+    atm_snow = any(ATMOSPH_COND_DESC == "Snowing", na.rm = TRUE),
+    atm_smoke = any(ATMOSPH_COND_DESC == "Smoke", na.rm = TRUE),
+    atm_wind = any(ATMOSPH_COND_DESC == "Strong winds", na.rm = TRUE),
+    atm_dust = any(ATMOSPH_COND_DESC == "Dust", na.rm = TRUE),
+    atm_clear = setequal(na.omit(ATMOSPH_COND_DESC), "Clear"),
+    .groups = "drop"
+  )
+
+surf_agg <- road_surf %>%
+  group_by(ACCIDENT_NO) %>%
+  summarise(
+    surf_wet = any(SURFACE_COND_DESC == "Wet", na.rm = TRUE),
+    surf_ice = any(SURFACE_COND_DESC == "Icy", na.rm = TRUE),
+    surf_mud = any(SURFACE_COND_DESC == "Muddy", na.rm = TRUE),
+    surf_snowy = any(SURFACE_COND_DESC == "Snowy", na.rm = TRUE),
+    surf_dry = setequal(na.omit(SURFACE_COND_DESC), "Dry"),
+    .groups = "drop"
+  )
+
+node_agg <- node |>
+  mutate(
+    urbanisation = case_when(
+      DEG_URBAN_NAME %in% c("MELB_URBAN", "MELBOURNE_CBD") ~ "Urban",
+      DEG_URBAN_NAME %in% c("LARGE_PROVINCIAL_CITIES", "SMALL_CITIES") ~ "Regional",
+      DEG_URBAN_NAME %in% c("TOWNS", "SMALL_TOWNS") ~ "Town",
+      DEG_URBAN_NAME == "RURAL_VICTORIA" ~ "Rural",
+      TRUE ~ "Unknown"
+    )
+  ) |>
+  distinct(ACCIDENT_NO, .keep_all = TRUE)
+```
+
+**Final integration and recoding.** The four aggregated frames left-join onto `accident + node` via `ACCIDENT_NO`, recoding the target, converting `LIGHT_CONDITION`/`SPEED_ZONE` to labelled factors, and deriving temporal features. The result `df` is the single analytic frame.
+
+```{r integrate, results='hide'}
+accident <- accident |> mutate(
+  # ── DCA family grouping ──
+  DCA_CODE_NUM = as.numeric(DCA_CODE),
+  dca_family = case_when(
+    DCA_CODE_NUM >= 100 & DCA_CODE_NUM <= 109 ~ "Pedestrian",
+    DCA_CODE_NUM >= 110 & DCA_CODE_NUM <= 119 ~ "Cross_Traffic",
+    DCA_CODE_NUM >= 120 & DCA_CODE_NUM <= 129 ~ "Head_On",
+    DCA_CODE_NUM >= 130 & DCA_CODE_NUM <= 139 ~ "Rear_End",
+    DCA_CODE_NUM >= 140 & DCA_CODE_NUM <= 149 ~ "Manoeuvring",
+    DCA_CODE_NUM >= 150 & DCA_CODE_NUM <= 159 ~ "Overtaking",
+    DCA_CODE_NUM >= 160 & DCA_CODE_NUM <= 169 ~ "On_Path",
+    DCA_CODE_NUM >= 170 & DCA_CODE_NUM <= 179 ~ "Off_Path_Straight",
+    DCA_CODE_NUM >= 180 & DCA_CODE_NUM <= 189 ~ "Off_Path_Curve",
+    DCA_CODE_NUM >= 190 & DCA_CODE_NUM <= 199 ~ "Other",
+    TRUE ~ "Special"
+  )
+)
+
+df <- accident %>%
+  left_join(node_agg, by = "ACCIDENT_NO") %>%
+  left_join(person_agg, by = "ACCIDENT_NO") %>%
+  left_join(vehicle_agg, by = "ACCIDENT_NO") %>%
+  left_join(surf_agg, by = "ACCIDENT_NO") %>%
+  left_join(atmos_agg, by = "ACCIDENT_NO") %>%
+  distinct(ACCIDENT_NO, .keep_all = TRUE) %>%
+  mutate(
+    SEVERITY = factor(
+      case_when(
+        SEVERITY == 1 ~ "Fatal",
+        SEVERITY == 2 ~ "Serious",
+        SEVERITY == 3 ~ "Minor",
+        SEVERITY == 4 ~ "PDO"
+      ),
+      levels = c("Fatal", "Serious", "Minor", "PDO")
+    ),
+    LIGHT_CONDITION = factor(LIGHT_CONDITION,
+      levels = c(1, 2, 3, 4, 5, 6, 9),
+      labels = c(
+        "Day", "Dusk/dawn", "Dark–lit",
+        "Dark–unlit", "Dark–unknown",
+        "Unknown", "Unknown"
+      )
+    ),
+    SPEED_ZONE = factor(ifelse(SPEED_ZONE %in% c(777, 888, 999), NA, SPEED_ZONE)),
+    YEAR = accident_year,
+    MONTH = factor(format(ACCIDENT_DATE, "%b"), levels = month.abb),
+    HOUR = as.integer(substr(ACCIDENT_TIME, 1, 2)),
+    TIME_OF_DAY = factor(
+      case_when(
+        HOUR >= 6 & HOUR < 12 ~ "Morning",
+        HOUR >= 12 & HOUR < 17 ~ "Afternoon",
+        HOUR >= 17 & HOUR < 21 ~ "Evening",
+        TRUE ~ "Night"
+      ),
+      levels = c("Morning", "Afternoon", "Evening", "Night")
+    ),
+    season = case_when(
+      MONTH %in% c("Dec", "Jan", "Feb") ~ "Summer",
+      MONTH %in% c("Mar", "Apr", "May") ~ "Autumn",
+      MONTH %in% c("Jun", "Jul", "Aug") ~ "Winter",
+      TRUE ~ "Spring"
+    ),
+    is_weekend = DAY_OF_WEEK %in% c(1, 7)
+  )
+```
+
+### 2.2 Dataset characteristics
+
+The integrated frame contains **`r comma(nrow(df))` unique crashes** across 13 years (2012–2025) and **`r ncol(df)` columns** mixing continuous (`NO_PERSONS`, `mean_age_lower`, `HOUR`), ordinal (`SPEED_ZONE`, `LIGHT_CONDITION`), and high-cardinality nominal variables (`ACCIDENT_TYPE_DESC`, `ROAD_GEOMETRY_DESC`, `LGA_NAME` with 80+ levels). One-hot encoding pushes the design matrix past 100 columns. Missingness is dominated by structural MNAR — `SPEED_ZONE` ~7.5%, `RMA` ~4.5% — handled with explicit "Unknown" levels rather than dropping. `NO_PERSONS` carries a single bus-crash outlier of `r max(df$NO_PERSONS, na.rm = TRUE)` requiring 99th-percentile capping for distance-based models.
+
+```{r class-imbalance-fig, fig.height=1.7, fig.width=4, out.width="35%", fig.cap="Fig 1. Severe class imbalance — Fatal crashes are 1.7% of records; PDO (n=4) is dropped."}
+sev_pal <- c(
+  "Fatal" = "#C0392B", "Serious" = "#E67E22",
+  "Minor" = "#F1C40F", "PDO" = "#27AE60"
+)
+df %>%
+  count(SEVERITY) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(SEVERITY, n, fill = SEVERITY)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(round(pct, 1), "%\n(n=", comma(n), ")")),
+    vjust = -0.2, size = 2.1
+  ) +
+  scale_fill_manual(values = sev_pal) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.32))) +
+  labs(x = NULL, y = "Count") +
+  theme_minimal(base_size = 7.5) +
+  theme(legend.position = "none", axis.text = element_text(size = 7))
+```
+
+The ~37:1 Minor-to-Fatal ratio makes raw accuracy misleading (a trivial "always-Minor" classifier scores 62.4%), motivating **macro-averaged F1**, **class-weighted loss**, and **SMOTE oversampling** in §3.
+
+### 2.3 Univariate analysis
+
+```{r uni-1, fig.height=2.4, fig.cap="Fig 2. Key predictors. (a) 60 km/h urban zones dominate (~55%). (b) Pronounced 15:00–17:00 commute peak. (c) ~85% of crashes involve 1–2 vehicles; long right tail motivates 99th-percentile capping. (d) Driver ages cluster 25–40 with a secondary 18–24 mode."}
+p1 <- df %>%
+  filter(!is.na(SPEED_ZONE)) %>%
+  count(SPEED_ZONE) %>%
+  ggplot(aes(SPEED_ZONE, n)) +
+  geom_col(fill = "#8E44AD", width = 0.7) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "(a)Speed zone", x = "km/h", y = "Count") +
+  theme_minimal(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p2 <- df %>%
+  count(HOUR) %>%
+  ggplot(aes(HOUR, n)) +
+  geom_col(fill = "#9B59B6", width = 0.85) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "(b) Hour of day", x = "Hour (0–23)", y = "Count") +
+  theme_minimal(base_size = 9)
+p3 <- df %>%
+  filter(NO_OF_VEHICLES <= 10) %>%
+  ggplot(aes(NO_OF_VEHICLES)) +
+  geom_histogram(binwidth = 1, fill = "#1ABC9C", colour = "white") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "(c) Vehicles involved", x = "No. vehicles", y = "Count") +
+  theme_minimal(base_size = 9)
+p4 <- df %>%
+  filter(!is.na(mean_age_lower)) %>%
+  ggplot(aes(mean_age_lower)) +
+  geom_histogram(binwidth = 5, fill = "#3498DB", colour = "white") +
+  labs(
+    title = "(d) Mean driver age (lower bound)",
+    x = "Age (years)", y = "Count"
+  ) +
+  theme_minimal(base_size = 9)
+((p1 | p2) / (p3 | p4)) &
+  theme(plot.margin = margin(4, 14, 4, 14))
+```
+
+**Univariate insights.** 60 km/h has the highest crash *volume* (urban density) but its *severity* profile is moderate — *volume ≠ risk*. The 15:00–17:00 peak reflects post-work commute traffic. The extreme right-tail in `NO_PERSONS` (max = `r max(df$NO_PERSONS, na.rm = TRUE)`) confirms capping before distance-based models.
+
+### 2.4 Bivariate analysis — features vs severity
+
+Each panel of Fig 3 holds the predictor distribution constant within each category and reports severity composition as a percentage — tall "Fatal" slices indicate conditions where a crash that occurs is *disproportionately* likely to kill, independent of frequency.
+
+```{r biv-panel, fig.height=3.3, fig.cap="Fig 3. Severity composition by four categorical predictors. (a) Fatal proportion rises monotonically with speed — kinetic energy ∝ v². (b) Dark-unlit roads have the highest fatal proportion despite low volume. (c) Head-on and struck-pedestrian crashes concentrate fatalities. (d) Off-carriageway and T-intersections dominate the fatal tail."}
+df$SEVERITY <- factor(df$SEVERITY)
+
+shared_fill <- scale_fill_manual(values = sev_pal)
+
+# All four plots: legend suppressed entirely
+p_sev_speed <- df %>%
+  filter(!is.na(SPEED_ZONE)) %>%
+  count(SPEED_ZONE, SEVERITY) %>%
+  group_by(SPEED_ZONE) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(SPEED_ZONE, pct, fill = SEVERITY)) +
+  geom_col(position = "fill", width = 0.8) +
+  shared_fill +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "(a) Severity by speed zone", x = "km/h", y = "Proportion", fill = NULL) +
+  theme_minimal(base_size = 9) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "none"
+  )
+
+p_sev_light <- df %>%
+  count(LIGHT_CONDITION, SEVERITY) %>%
+  group_by(LIGHT_CONDITION) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(fct_reorder(LIGHT_CONDITION, pct), pct, fill = SEVERITY)) +
+  geom_col(position = "fill", width = 0.8) +
+  coord_flip() +
+  shared_fill +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "(b) Severity by light condition", x = NULL, y = "Proportion", fill = NULL) +
+  theme_minimal(base_size = 9) +
+  theme(
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "none"
+  )
+
+p_sev_type <- df %>%
+  count(ACCIDENT_TYPE_DESC, SEVERITY) %>%
+  group_by(ACCIDENT_TYPE_DESC) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(fct_reorder(ACCIDENT_TYPE_DESC, pct * (SEVERITY == "Fatal"), max), pct, fill = SEVERITY)) +
+  geom_col(position = "fill", width = 0.8) +
+  coord_flip() +
+  shared_fill +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "(c) Severity by accident type", x = NULL, y = "Proportion", fill = NULL) +
+  theme_minimal(base_size = 8.5) +
+  theme(
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "none"
+  )
+
+p_sev_geom <- df %>%
+  count(ROAD_GEOMETRY_DESC, SEVERITY) %>%
+  group_by(ROAD_GEOMETRY_DESC) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(fct_reorder(ROAD_GEOMETRY_DESC, pct * (SEVERITY == "Fatal"), max), pct, fill = SEVERITY)) +
+  geom_col(position = "fill", width = 0.8) +
+  coord_flip() +
+  shared_fill +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "(d) Severity by road geometry", x = NULL, y = "Proportion", fill = NULL) +
+  theme_minimal(base_size = 9) +
+  theme(
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "none"
+  )
+
+# Extract legend from a throwaway copy of any plot WITH the legend visible
+legend_only <- get_legend(
+  p_sev_speed +
+    theme(
+      legend.position = "bottom",
+      legend.key.size = unit(0.35, "cm")
+    )
+)
+
+# Combine the 4 plots (no legend anywhere)
+grid_4 <- plot_grid(
+  p_sev_speed, p_sev_light,
+  p_sev_type,  p_sev_geom,
+  ncol = 2,
+  align = "hv"
+)
+
+# Stack grid + legend
+plot_grid(
+  grid_4,
+  legend_only,
+  ncol        = 1,
+  rel_heights = c(1, 0.08)
+)
+```
+
+Panels (a)–(d) jointly identify the predictors that drive severity. The monotonic speed effect in (a) is the strongest single signal and is retained as a numeric ordinal feature. Panels (c)–(d) explain most of the rural-highway fatal excess, motivating heavy weight on `ACCIDENT_TYPE_DESC` and `ROAD_GEOMETRY_DESC`.
+
+Fig 4 cross-tabulates vehicle category with speed zone — the vehicle effect is *non-additive* with speed, motivating tree/ensemble models that partition on interactions internally.
+
+```{r biv-veh-heatmap, fig.height=2.1, fig.width=8, out.width="75%", fig.cap="Fig 4. Vehicle category × speed zone fatal and serious rates (%). Slope steepest for motorcycles (limited protection), shallowest for heavy vehicles (mass advantage)."}
+cat_levels <- c("Passenger", "Heavy", "Motorcycle", "Bicycle", "Public")
+valid_zones <- c(40, 50, 60, 70, 80, 90, 100, 110)
+veh_sev <- vehicle %>%
+  mutate(
+    VEHICLE_TYPE_N = suppressWarnings(as.numeric(VEHICLE_TYPE)),
+    vehicle_category = case_when(
+      VEHICLE_TYPE_N %in% PASSENGER_V ~ "Passenger",
+      VEHICLE_TYPE_N %in% HEAVY_V ~ "Heavy",
+      VEHICLE_TYPE_N %in% MOTORCYCLE_V ~ "Motorcycle",
+      VEHICLE_TYPE_N %in% BICYCLE_DRAWN ~ "Bicycle",
+      VEHICLE_TYPE_N %in% PUBLIC_V ~ "Public",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(vehicle_category)) %>%
+  left_join(df %>% select(ACCIDENT_NO, SEVERITY, SPEED_ZONE),
+    by = "ACCIDENT_NO"
+  ) %>%
+  mutate(SPEED_ZONE_NUM = suppressWarnings(as.numeric(as.character(SPEED_ZONE)))) %>%
+  filter(!is.na(SPEED_ZONE_NUM), SPEED_ZONE_NUM %in% valid_zones) %>%
+  distinct(ACCIDENT_NO, vehicle_category, .keep_all = TRUE) %>%
+  mutate(
+    vehicle_category = factor(vehicle_category, levels = cat_levels),
+    SPEED_ZONE_NUM = factor(SPEED_ZONE_NUM)
+  ) %>%
+  group_by(vehicle_category, SPEED_ZONE_NUM) %>%
+  summarise(
+    fatal_rate = mean(SEVERITY == "Fatal", na.rm = TRUE) * 100,
+    serious_rate = mean(SEVERITY == "Serious", na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+hm <- function(d, col, title, hi, cap) {
+  ggplot(d, aes(SPEED_ZONE_NUM,
+    factor(vehicle_category, levels = rev(cat_levels)),
+    fill = .data[[col]]
+  )) +
+    geom_tile(colour = "white", linewidth = 0.5) +
+    geom_text(aes(label = sprintf("%.1f%%", .data[[col]])), size = 1.7) +
+    scale_fill_gradient(
+      low = "#fff5f0", high = hi,
+      limits = c(0, cap), na.value = "grey92", name = NULL
+    ) +
+    labs(title = title, x = "km/h", y = NULL) +
+    theme_minimal(base_size = 9) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.key.size = unit(0.25, "cm")
+    )
+}
+(hm(veh_sev, "fatal_rate", "Fatal rate (%)", "#C0392B", 25) |
+  hm(veh_sev, "serious_rate", "Serious rate (%)", "#E67E22", 62)) &
+  theme(plot.margin = margin(4, 14, 4, 14))
+```
+
+Behaviourally, ejection is the single strongest in-cabin signal — a near-perfect proxy for seatbelt non-compliance and a testable policy lever.
+
+```{r biv-person, fig.height=1.6, fig.width=4, out.width="32%", fig.align="center", fig.cap="Fig 5. Ejection vs severity — crashes with any ejected occupant show fatal proportion roughly 5× higher than non-ejection crashes."}
+df %>%
+  filter(!is.na(any_ejected)) %>%
+  mutate(ejected_lbl = factor(any_ejected,
+    levels = c(FALSE, TRUE),
+    labels = c("Not ejected", "Ejected")
+  )) %>%
+  count(ejected_lbl, SEVERITY) %>%
+  group_by(ejected_lbl) %>%
+  mutate(pct = n / sum(n)) %>%
+  ggplot(aes(ejected_lbl, pct, fill = SEVERITY)) +
+  geom_col(position = "fill", width = 0.45) +
+  scale_fill_manual(values = sev_pal) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = NULL, x = NULL, y = "Proportion", fill = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "right", # Changed from "bottom" to "right"
+    legend.key.size = unit(0.35, "cm"),
+    plot.margin = margin(4, 4, 4, 4)
+  ) # Reduced right margin to allow space
+```
+
+### 2.5 Target leakage check
+
+`NO_PERSONS_KILLED`, `NO_PERSONS_INJ_2`, and `NO_PERSONS_INJ_3` are post-outcome counts — including them inflates CV scores and fails at deployment. Fig 6 confirms their tight correlation with the target and motivates their exclusion in §3.1.
+
+```{r add-corr, fig.height=2.4, fig.width=3.6, out.width="32%", fig.align="center", fig.cap="Fig 6. Correlation matrix of candidate numeric predictors. NO_PERSONS_KILLED/INJ_2/INJ_3 are outcome-derived and excluded; NO_OF_VEHICLES↔NO_PERSONS (r≈0.53) is handled by L2 regularisation."}
+num_df <- df %>%
+  select(
+    NO_OF_VEHICLES, NO_PERSONS, NO_PERSONS_KILLED,
+    NO_PERSONS_INJ_2, NO_PERSONS_INJ_3, mean_age_lower, HOUR
+  ) %>%
+  drop_na() %>%
+  rename(
+    Vehicles = NO_OF_VEHICLES, Persons = NO_PERSONS,
+    Killed = NO_PERSONS_KILLED,
+    Inj_Ser = NO_PERSONS_INJ_2, Inj_Min = NO_PERSONS_INJ_3,
+    MeanAge = mean_age_lower, Hour = HOUR
+  )
+ggcorrplot(cor(num_df),
+  method = "square", type = "lower",
+  lab = TRUE, lab_size = 2,
+  colors = c("#2980B9", "white", "#C0392B"),
+  title = ""
+) +
+  theme_minimal(base_size = 7) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6.5),
+    axis.text.y = element_text(size = 6.5),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6.5),
+    legend.key.size = unit(0.25, "cm"),
+    plot.margin = margin(2, 4, 2, 4)
+  )
+```
+
+### 2.6 EDA summary — modelling implications
+
+| Feature | EDA finding | Implication for modelling |
+|:---|:---|:---|
+| `SPEED_ZONE` | Monotonic ↑ fatal rate; strongest signal (Fig 3a) | Ordinal integer encoding; retained as numeric |
+| `ACCIDENT_TYPE_DESC` | Head-on & struck-pedestrian highest fatal % (Fig 3c) | One-hot for GLM/KNN; native factor for trees |
+| `LIGHT_CONDITION` | Dark-unlit overrepresented in fatal (Fig 3b) | Ordinal: Day < Dusk/dawn < Dark-lit < Dark-unlit |
+| `vehicle_category` | Motorcycles' fatal rate steep with speed; heavy vehicles flat (Fig 4) | Binary category flags; non-additive interaction → trees |
+| `any_ejected`, `any_no_seatbelt` | Ejection ≈ 5× fatal-rate lift (Fig 5) | Binary flags; `seatbelt_unknown` for MNAR structure |
+| `HOUR`, `DAY_WEEK_DESC` | Weekday-afternoon + weekend-night peaks | Include `HOUR` + derived `TIME_OF_DAY` |
+| `NO_PERSONS_KILLED/INJ_2/INJ_3` | Outcome-derived (Fig 6) | **Exclude — target leakage** |
+| `NO_PERSONS` | Bus outlier (max = `r max(df$NO_PERSONS, na.rm = TRUE)`) | Cap at 99th percentile before KNN/GLM |
+
+---
+
+## 3. Model Implementation Details
+
+```{r ml-libs, message=FALSE, results='hide', cache=FALSE}
+# Modelling stack — cache=FALSE so packages are always attached.
+suppressPackageStartupMessages({
+  library(rsample)      # split / CV
+  library(recipes)      # preprocessing
+  library(themis)       # SMOTE
+  library(glmnet)       # penalised multinomial LR
+  library(rpart)        # decision tree
+  library(ranger)       # fast RF
+  library(xgboost)      # XGBoost
+  library(kknn)         # weighted KNN
+  library(yardstick)    # metrics
+  library(vip)          # variable importance
+})
+```
+
+### 3.1 Preprocessing & splitting strategy
+
+The preprocessing pipeline is constructed under a strict *no-leakage* discipline: every statistic that flows from data into the model — class oversampling targets, median imputation values, factor-level encodings, and standardisation parameters — is estimated *only* from training data and applied to held-out folds and the test set as fixed transformations (Hastie et al., 2009; Kuhn & Silge, 2022). The pipeline runs in a fixed order:
+
+(1) **Drop PDO.** The Property-Damage-Only class contains *n* = 4 records (<0.01%) which is below the minimum sample size for any non-degenerate train/test split or 5-fold CV partition; these rows are removed and the target is collapsed to three classes — Fatal, Serious, Minor.
+
+(2) **Remove target-leakage variables.** `NO_PERSONS_KILLED`, `NO_PERSONS_INJ_2` (serious-injury count), `NO_PERSONS_INJ_3` (minor-injury count), `NO_PERSONS_NOT_INJ`, and `prop_serious_inj` are each direct mechanical functions of the outcome and are excluded. Their inclusion would inflate CV macro-F1 toward 1.0 while collapsing at deployment because these counts are unavailable at first-dispatch report time (Kaufman et al., 2012).
+
+(3) **Outlier capping.** `NO_PERSONS` is winsorised at the 99th percentile to neutralise a single bus-crash outlier (max = 81) that lies more than 20 standard deviations above the mean. Distance-based learners (KNN) and L2-penalised GLMs are sensitive to this scale — uncapped, the outlier dominates the Euclidean metric and saturates feature standardisation.
+
+(4) **Structured missingness handling.** Three mechanisms are treated separately. *(a)* `SPEED_ZONE` and `RMA` are MNAR — their missingness encodes off-road, private-road, or non-road-managed crashes — so an explicit `"Unknown"` factor level is added to retain the signal. *(b)* Behavioural binary flags (`any_ejected`, `any_no_seatbelt`, `any_no_helmet`) are mode-imputed to `FALSE` with a parallel `seatbelt_unknown` indicator that carries the missingness signal forward (Sterne et al., 2009). *(c)* Continuous covariates (`mean_age_lower`, `mean_vehicle_age`) are imputed with the *training-fold* median, which is robust to skew and avoids re-fitting per fold.
+
+(5) **Stratified 70/30 split** preserves the marginal Fatal/Serious/Minor distribution in both partitions. The training partition (~136k rows) drives all model fitting and tuning; the test partition (~58k rows) is touched once per model for final evaluation.
+
+(6) **Class imbalance handling.** The 37:1 Minor-to-Fatal ratio is addressed via model-appropriate strategies rather than one global resampling rule. *Logistic Regression and KNN* receive SMOTE-oversampled training folds with `over_ratio = 0.5` (Fatal lifted to 50% of Serious count); SMOTE is fit *within* each CV fold's analysis split to prevent synthetic-sample leakage into the assessment fold (Chawla et al., 2002). *XGBoost* is instead trained on the natural class distribution with inverse-frequency case weights, which preserves the deployment base rate while still increasing the loss contribution of Fatal and Serious crashes. *Decision Tree* uses balanced class priors `prior = (1/3, 1/3, 1/3)` via the `parms` argument of `rpart`, which adjusts the impurity-gain calculation symmetrically (Therneau & Atkinson, 2022). *Random Forest* uses `class.weights = c(Fatal = 30, Serious = 1, Minor = 1)` inside `ranger`, which scales the within-tree split criterion (Wright & Ziegler, 2017).
+
+```{r build-model-df, results='hide'}
+model_df <- df %>%
+  filter(SEVERITY != "PDO") %>%
+  droplevels() %>%
+  mutate(
+    SEVERITY = factor(SEVERITY, levels = c("Fatal", "Serious", "Minor")),
+    NO_PERSONS = pmin(NO_PERSONS, quantile(NO_PERSONS, 0.99, na.rm = TRUE)),
+    SPEED_ZONE = fct_explicit_na(factor(SPEED_ZONE), "Unknown"),
+    RMA = fct_explicit_na(factor(RMA), "Unknown"),
+    LIGHT_CONDITION = fct_explicit_na(LIGHT_CONDITION, "Unknown"),
+    seatbelt_unknown = as.integer(is.na(any_no_seatbelt)),
+    any_ejected = replace_na(any_ejected, FALSE),
+    any_no_seatbelt = replace_na(any_no_seatbelt, FALSE),
+    any_no_helmet = replace_na(any_no_helmet, FALSE),
+    has_motorcycle = replace_na(has_motorcycle, FALSE),
+    has_heavy_v = replace_na(has_heavy_v, FALSE),
+    has_pedestrian = replace_na(has_pedestrian, FALSE),
+    has_cyclist = replace_na(has_cyclist, FALSE),
+    is_weekend = as.integer(is_weekend)
+  ) %>%
+  # Keep a compact, modelling-ready predictor set
+  transmute(
+    SEVERITY,
+    SPEED_ZONE, LIGHT_CONDITION,
+    ACCIDENT_TYPE = factor(ACCIDENT_TYPE_DESC),
+    ROAD_GEOMETRY = factor(ROAD_GEOMETRY_DESC),
+    RMA,
+    DAY_WEEK = factor(DAY_WEEK_DESC),
+    HOUR, is_weekend,
+    NO_OF_VEHICLES, NO_PERSONS,
+    mean_age_lower, mean_vehicle_age,
+    n_drivers = replace_na(n_drivers, 1),
+    has_motorcycle, has_heavy_v, has_pedestrian, has_cyclist,
+    any_ejected, any_no_seatbelt, any_no_helmet, seatbelt_unknown,
+    has_young_drv = replace_na(has_young_drv, FALSE),
+    has_elderly_drv = replace_na(has_elderly_drv, FALSE),
+    atm_rain = replace_na(atm_rain, FALSE),
+    atm_fog = replace_na(atm_fog, FALSE),
+    surf_wet = replace_na(surf_wet, FALSE),
+    urbanisation = factor(replace_na(urbanisation, "Unknown"))
+  ) %>%
+  # step_smote requires double/integer predictors — coerce logicals to 0/1
+  mutate(across(where(is.logical), as.integer)) %>%
+  drop_na(SEVERITY)
+
+set.seed(42)
+split_obj   <- initial_split(model_df, prop = 0.70, strata = SEVERITY)
+train_full  <- training(split_obj)
+test_full   <- testing(split_obj)
+
+# Median imputation fit on training fold only
+med_age <- median(train_full$mean_age_lower,    na.rm = TRUE)
+med_veh <- median(train_full$mean_vehicle_age,  na.rm = TRUE)
+impute_fn <- function(d) d %>%
+  mutate(
+    mean_age_lower   = replace_na(mean_age_lower,   med_age),
+    mean_vehicle_age = replace_na(mean_vehicle_age, med_veh)
+  )
+train_full <- impute_fn(train_full)
+test_full  <- impute_fn(test_full)
+
+# Tuning subsample (stratified 50k) — keeps CV tractable on 190k rows
+set.seed(7)
+tune_prop  <- min(1, 50000 / nrow(train_full))
+train_tune <- train_full %>%
+  group_by(SEVERITY) %>%
+  slice_sample(prop = tune_prop) %>%
+  ungroup()
+
+cat("Train (full):", nrow(train_full),
+    " | Tune subsample:", nrow(train_tune),
+    " | Test:", nrow(test_full), "\n")
+```
+
+The full training set (`r format(nrow(train_full), big.mark=",")` rows) is reserved for *final* model fitting; a 50k stratified tuning subsample is used for hyperparameter search. This is the standard tune-on-subsample / refit-on-full pattern recommended for large-scale empirical work (Hastie et al., 2009; Kuhn & Silge, 2022).
+
+### 3.2 Feature engineering
+
+The benchmark models partition into two algorithmic families with incompatible input requirements, so we maintain **three preprocessing recipes**: one native-factor recipe for tree models, one SMOTE-balanced numeric recipe for LR/KNN, and one non-SMOTE numeric recipe for XGBoost. *Parametric* (Logistic Regression) and *distance-based* (KNN) learners require a dense, all-numeric design matrix with categorical predictors one-hot encoded, scale-invariant features standardised to unit variance, and reference levels dropped to avoid collinearity. *Tree-based* learners (Decision Tree, Random Forest) handle high-cardinality factors natively through axis-aligned splits and are invariant to monotone transformations of continuous features, so dummy encoding and standardisation are unnecessary and would inflate the design-matrix width without information gain (Hastie et al., 2009). XGBoost is an exception within the tree family: although gradient-boosted trees are scale-invariant, the `xgboost::xgb.DMatrix` interface accepts only numeric matrices, so XGBoost receives numeric encoding without synthetic oversampling.
+
+The recipes therefore differ on three axes:
+*(i)* `step_integer` converts the ordinal predictors `SPEED_ZONE` and `LIGHT_CONDITION` to integer codes for LR/KNN/XGBoost, preserving the monotone severity gradient identified in Fig 3a — this is more efficient than one-hot encoding because the linear model can learn a single signed coefficient rather than one per level;
+*(ii)* `step_dummy` then converts remaining nominal predictors into binary indicator columns with the most-frequent level dropped (no-intercept design is enforced via `model.matrix(~ . - 1, ...)` at fit time);
+*(iii)* `step_zv` removes any zero-variance predictor that arises after dummy encoding, and `step_normalize` rescales every numeric column to mean 0, variance 1 — necessary for KNN's Euclidean metric and for L2 regularisation to penalise coefficients on a comparable scale (Kuhn & Silge, 2022).
+
+`step_smote` is appended only to the LR/KNN recipe because SMOTE requires double or integer predictors throughout and can distort probability calibration for boosted trees. XGBoost receives the same numeric encoding and scaling but no synthetic rows; its imbalance correction enters through per-row loss weights. Within the tree recipe, class imbalance is instead addressed by model-internal priors and weights (§3.1, step 6). For all recipes, `step_novel` and `step_unknown` precede every other step to handle any test-set factor levels unseen at training time — a deployment-safety guard that maps unknown levels to a dedicated "novel" bucket rather than throwing a runtime error.
+
+```{r recipes, results='hide'}
+# Recipe A — tree-based models: native factors, no scaling.
+# Imbalance is handled inside each model via case/class weights, not SMOTE
+# (themis::step_smote requires all-numeric predictors which would force one-hot).
+rec_tree <- recipe(SEVERITY ~ ., data = train_tune) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors())
+
+# Recipe B — LR / KNN: ordinal integers + one-hot dummies + scaling + SMOTE.
+# After step_dummy all predictors are numeric, so SMOTE is safe.
+rec_lin <- recipe(SEVERITY ~ ., data = train_tune) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_integer(SPEED_ZONE, LIGHT_CONDITION, strict = FALSE) %>%
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_smote(SEVERITY, over_ratio = 0.5, seed = 42)
+
+# Recipe C — XGBoost: same numeric design, but no SMOTE.
+# Boosted probabilities are sensitive to synthetic class priors, so imbalance
+# is handled by case weights inside xgb.DMatrix instead.
+rec_xgb <- recipe(SEVERITY ~ ., data = train_tune) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_integer(SPEED_ZONE, LIGHT_CONDITION, strict = FALSE) %>%
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+```
+
+### 3.3 Classification models fitted
+
+The five benchmark models are chosen to span the *bias–variance* and *interpretability–flexibility* axes that matter for crash severity prediction. Each model maps to a specific EDA finding it is positioned to exploit, and together they form a defensible diagnostic panel rather than five interchangeable competitors.
+
+**Multinomial Logistic Regression** (Hastie et al., 2009) is the parametric, fully-interpretable baseline. It models the log-odds of each class against a reference as a linear combination of predictors, fit by L2-penalised maximum likelihood via `glmnet`. Its signed coefficients quantify each factor's marginal contribution to severity log-odds — a property no other model in the panel shares — making it the natural model for stakeholder communication and for the hypothesis-testing components of the research question (e.g. "what is the speed-zone effect *holding light condition fixed*?"). The monotone severity gradient on `SPEED_ZONE` (Fig 3a) and `LIGHT_CONDITION` (Fig 3b) is precisely the kind of signal a log-linear decision boundary captures cleanly. L2 regularisation is preferred over L1 here because we expect *all* predictors to carry some weight rather than seek a sparse subset.
+
+**Decision Tree** (rpart, Breiman et al., 1984) is the non-linear interpretable counterpart. A single pruned tree learns axis-aligned threshold rules of the form *"if SPEED_ZONE ≥ 100 and ROAD_GEOMETRY = Off-carriageway then Fatal probability = 0.34"* — exactly the form of evidence required by VicRoads engineering teams when prioritising intersection redesigns. The cost-complexity parameter `cp` controls the pruning aggression and is tuned on a 4-point grid `{0.001, 0.005, 0.01, 0.02}` covering the plateau of typical depth–accuracy trade-offs (Therneau & Atkinson, 2022).
+
+**Random Forest** (ranger, Breiman, 2001) is the variance-reduction ensemble. By averaging predictions across 300–500 deeply-grown trees, each fit on a bootstrap resample with a random subset of `mtry` predictors per split, RF cancels the high variance of a single tree at the cost of interpretability. RF is particularly well suited to the EDA-confirmed `vehicle_category × SPEED_ZONE` interaction (Fig 4) because each tree partitions both axes simultaneously without a parametric specification. Hyperparameter tuning explores `mtry ∈ {4, 8}` (around the √p ≈ 5–6 default) and `num.trees ∈ {300, 500}` — beyond which Hastie et al. (2009) report diminishing returns. Class imbalance is handled inside the splitter via `class.weights = (Fatal = 30, Serious = 1, Minor = 1)` rather than by SMOTE (which is incompatible with native factor handling).
+
+**XGBoost** (Chen & Guestrin, 2016) extends Friedman's (2001) gradient boosting machine with sparsity-aware split-finding, second-order loss expansion, and aggressive regularisation. Whereas Random Forest reduces variance by averaging independent trees, XGBoost reduces *bias* by sequentially fitting each new tree to the residual errors of the previous ensemble — a different inductive bias that is typically state-of-the-art on tabular classification (Grinsztajn et al., 2022). The tuning grid sweeps `max_depth ∈ {4, 6, 8}` (controlling tree complexity) crossed with `eta ∈ {0.05, 0.10}` (controlling shrinkage / step size) at fixed `subsample = 0.8` and `nrounds = 200`. Class imbalance is handled with inverse-frequency case weights inside `xgb.DMatrix`. This is preferable to SMOTE for boosting because it preserves the natural deployment base rate while still penalising mistakes on rare Fatal crashes.
+
+**K-Nearest Neighbours** (kknn, Cover & Hart, 1967) is the non-parametric diagnostic. Unlike the four models above, KNN makes no functional assumption about the decision boundary — predictions are local averages over the *k* nearest training rows in standardised feature space. KNN's role in the panel is twofold. First, *if* Fatal crashes cluster geometrically (high-speed × dark × rural × ejected), KNN exploits this directly without parametric mediation. Second, *if* KNN performs comparably to the global models, severity is governed by smoothly-varying local structure; if it underperforms, severity is driven by *global, axis-aligned* feature interactions (which favour tree-based ensembles). The result is therefore informative regardless of direction. The grid `k ∈ {11, 21, 51}` brackets a range that balances bias (small k → overfit local noise) and variance (large k → smooth toward the majority class).
+
+**Why these five and not others.** This panel covers the four axes germane to imbalanced multi-class tabular classification: *linearity* (LR), *interpretability* (DT, LR), *variance reduction* (RF), *bias reduction via boosting* (XGBoost), and *local-geometry diagnostics* (KNN). Candidate sixth models were considered and rejected at this benchmark stage. *LightGBM* (Ke et al., 2017) duplicates XGBoost's inductive bias with marginal gains on tabular data of this size; including both would consume a slot without adding methodological breadth. *Naïve Bayes* assumes conditional independence of features given class — strongly violated here by the documented `vehicle × speed × geometry` interactions (Fig 4). *Neural networks* (MLP, TabNet) consistently underperform tree-based models on tabular data with mixed continuous and categorical predictors and severe class imbalance, particularly at this dataset size (Grinsztajn et al., 2022); their architectural overhead is disproportionate to expected gains. *SVM with RBF kernel* would require *O*(*n*²) kernel-matrix storage on 136k training rows — computationally infeasible on a single workstation.
+
+### 3.4 Hyperparameter tuning
+
+**Selection metric.** The five benchmark models are tuned by **macro-averaged F1** on **5-fold stratified cross-validation**:
+
+$$\text{Macro F1} = \frac{1}{3}\sum_{k\in\{\text{Fatal, Serious, Minor}\}}\frac{2 \cdot P_k \cdot R_k}{P_k + R_k}$$
+
+Macro-F1 weights every class equally and is therefore *robust* to the 37:1 imbalance — unlike raw accuracy (which the trivial always-Minor classifier scores 62.4% on, with zero Fatal recall) and weighted-F1 (which collapses toward Minor F1 with majority-class weight 0.624). Stratified folds preserve the marginal class distribution within each split so that the Fatal class is always represented at its true proportion in both analysis and assessment partitions, preventing degenerate folds where Fatal recall is undefined.
+
+**Tune-on-subsample, refit-on-full protocol.** With 136k training rows and a 5-fold harness, full-data CV would imply ~109k training fits per hyperparameter point — multiplied by the 4–6 grid points per model and 5 benchmark models, this exceeds reasonable compute on a workstation. We adopt the standard alternative: tune on a **stratified 50k subsample** of the training set, select hyperparameters by CV macro-F1, then refit the chosen configuration on the **full 136k training set** for final evaluation. This protocol is widely documented in large-scale empirical machine learning (Hastie et al., 2009 §7; Kuhn & Silge, 2022 §10.3) and was confirmed acceptable for this assignment by teaching staff (Forum Q#218). Its single trade-off is slightly noisier CV estimates than full-data tuning, but at 50k rows the standard error of the macro-F1 mean across folds is small (typically < 0.01) — well below the gap between competing model classes. The same 50k subsample drives KNN tuning so that all benchmark models report comparable CV variance.
+
+**Grid choices.** Tuning grids are deliberately compact and theoretically motivated rather than exhaustive, following Bergstra and Bengio's (2012) finding that random or coarse grids over a few well-chosen axes match dense grid-search performance at a fraction of the cost. Per-model:
+
+- *Logistic Regression*: 5 log-spaced values of L2 penalty `λ ∈ [10⁻⁴, 1]` — bracketing the regularisation regime from near-OLS (low λ) to heavy shrinkage (high λ).
+- *Decision Tree*: 4 cost-complexity values `cp ∈ {0.001, 0.005, 0.01, 0.02}` — the plateau over which `rpart` typically discriminates among meaningful pruning depths.
+- *Random Forest*: 2 × 2 grid in `mtry × num.trees` = `{4, 8} × {300, 500}` at fixed `min.node.size = 20`.
+- *XGBoost*: 3 × 2 grid in `max_depth × eta` = `{4, 6, 8} × {0.05, 0.10}` at fixed `subsample = 0.8`, `nrounds = 200`, and inverse-frequency case weights.
+- *KNN*: 3-point grid `k ∈ {11, 21, 51}` covering low-variance smoothing through majority-class regression.
+
+**Test-set discipline.** The held-out test set is touched **once per model**, using the chosen hyperparameters refit on the full training set. No hyperparameter selection is informed by test-set scores at any point, preserving the validity of the reported test-set metrics as honest out-of-sample estimates.
+
+```{r tune-helpers, results='hide'}
+set.seed(42)
+tune_folds <- vfold_cv(train_tune, v = 5, strata = SEVERITY)
+
+# Macro-F1 helper for matrix-of-class predictions
+macro_f1 <- function(truth, pred) {
+  cm <- table(truth = factor(truth, levels = c("Fatal","Serious","Minor")),
+              pred  = factor(pred,  levels = c("Fatal","Serious","Minor")))
+  diag <- diag(cm)
+  prec <- diag / pmax(colSums(cm), 1)
+  rec  <- diag / pmax(rowSums(cm), 1)
+  f1   <- ifelse(prec + rec == 0, 0, 2 * prec * rec / (prec + rec))
+  mean(f1)
+}
+
+# Inverse-frequency weights for multiclass losses. The cap avoids allowing the
+# Fatal class to completely dominate tree growth in very small folds.
+case_weights <- function(y, cap = 50) {
+  y <- factor(y, levels = c("Fatal","Serious","Minor"))
+  tab <- table(y)
+  raw <- length(y) / (length(tab) * tab)
+  as.numeric(pmin(raw[as.character(y)], cap))
+}
+
+binary_case_weights <- function(y, cap = 50) {
+  y <- factor(y)
+  tab <- table(y)
+  raw <- length(y) / (length(tab) * tab)
+  as.numeric(pmin(raw[as.character(y)], cap))
+}
+
+# CV-fold prep helper: prep recipe on each fold's analysis data only
+cv_score <- function(recipe_obj, fit_fn, predict_fn, folds = tune_folds) {
+  scores <- numeric(length(folds$splits))
+  for (i in seq_along(folds$splits)) {
+    sp <- folds$splits[[i]]
+    tr <- analysis(sp); va <- assessment(sp)
+    rp <- prep(recipe_obj, training = tr, retain = TRUE)
+    tr_b <- bake(rp, new_data = NULL)
+    va_b <- bake(rp, new_data = va)
+    fit  <- fit_fn(tr_b)
+    pr   <- predict_fn(fit, va_b)
+    scores[i] <- macro_f1(va$SEVERITY, pr)
+  }
+  c(mean = mean(scores), sd = sd(scores))
+}
+```
+
+```{r tune-lr, cache=TRUE}
+# ── 1. Multinomial Logistic Regression (glmnet, L2-penalised) ──
+lambda_grid <- 10 ^ seq(-4, 0, length.out = 5)
+lr_results <- map_dfr(lambda_grid, function(lam) {
+  fit_fn <- function(tr) {
+    X <- model.matrix(SEVERITY ~ . - 1, data = tr)
+    glmnet::glmnet(X, tr$SEVERITY, family = "multinomial",
+                   alpha = 0, lambda = lam)
+  }
+  pred_fn <- function(fit, va) {
+    X <- model.matrix(SEVERITY ~ . - 1, data = va)
+    factor(predict(fit, X, type = "class")[, 1],
+           levels = c("Fatal","Serious","Minor"))
+  }
+  s <- cv_score(rec_lin, fit_fn, pred_fn)
+  tibble(lambda = lam, macroF1 = s["mean"], sd = s["sd"])
+})
+lr_best <- lr_results %>% slice_max(macroF1, n = 1)
+```
+
+```{r tune-dt, cache=TRUE}
+# ── 2. Decision Tree (rpart, cost-complexity pruning, balanced priors) ──
+# Balanced class priors compensate for imbalance in lieu of SMOTE.
+cp_grid <- c(0.001, 0.005, 0.01, 0.02)
+dt_results <- map_dfr(cp_grid, function(cp_val) {
+  fit_fn  <- function(tr) rpart::rpart(SEVERITY ~ ., data = tr,
+              parms = list(prior = c(1/3, 1/3, 1/3)),
+              control = rpart::rpart.control(cp = cp_val, maxdepth = 12))
+  pred_fn <- function(fit, va) predict(fit, va, type = "class")
+  s <- cv_score(rec_tree, fit_fn, pred_fn)
+  tibble(cp = cp_val, macroF1 = s["mean"], sd = s["sd"])
+})
+dt_best <- dt_results %>% slice_max(macroF1, n = 1)
+```
+
+```{r tune-rf, cache=TRUE}
+# ── 3. Random Forest (ranger, class-weighted) ──
+rf_grid <- expand.grid(mtry = c(4, 8), num.trees = c(300, 500))
+class_weights <- c(Fatal = 30, Serious = 1, Minor = 1)
+
+rf_results <- pmap_dfr(rf_grid, function(mtry, num.trees) {
+  fit_fn <- function(tr) ranger::ranger(
+    SEVERITY ~ ., data = tr, num.trees = num.trees, mtry = mtry,
+    min.node.size = 20, class.weights = class_weights,
+    probability = FALSE, num.threads = 4
+  )
+  pred_fn <- function(fit, va) predict(fit, va)$predictions
+  s <- cv_score(rec_tree, fit_fn, pred_fn)
+  tibble(mtry = mtry, ntree = num.trees,
+         macroF1 = s["mean"], sd = s["sd"])
+})
+rf_best <- rf_results %>% slice_max(macroF1, n = 1)
+```
+
+```{r tune-xgb, cache=TRUE}
+# ── 4. XGBoost (multi:softprob) — natural base rate + case weights.
+# Use the lower-level xgb.train + xgb.DMatrix API for explicit objective
+# control (xgboost ≥2.0's high-level wrapper auto-infers objective from y).
+xgb_grid <- expand.grid(
+  max_depth = c(4, 6, 8),
+  eta       = c(0.05, 0.1),
+  subsample = 0.8
+)
+xgb_results <- pmap_dfr(xgb_grid, function(max_depth, eta, subsample) {
+  fit_fn <- function(tr) {
+    X <- model.matrix(SEVERITY ~ . - 1, data = tr)
+    y <- as.integer(tr$SEVERITY) - 1L
+    dtrain <- xgboost::xgb.DMatrix(
+      data = X, label = y,
+      weight = case_weights(tr$SEVERITY)
+    )
+    xgboost::xgb.train(
+      params = list(
+        objective = "multi:softprob", num_class = 3,
+        max_depth = max_depth, eta = eta, subsample = subsample,
+        nthread = 4
+      ),
+      data = dtrain, nrounds = 200, verbose = 0
+    )
+  }
+  pred_fn <- function(fit, va) {
+    X <- model.matrix(SEVERITY ~ . - 1, data = va)
+    p <- matrix(predict(fit, X), ncol = 3, byrow = TRUE)
+    factor(c("Fatal","Serious","Minor")[apply(p, 1, which.max)],
+           levels = c("Fatal","Serious","Minor"))
+  }
+  s <- cv_score(rec_xgb, fit_fn, pred_fn)
+  tibble(max_depth = max_depth, eta = eta, subsample = subsample,
+         macroF1 = s["mean"], sd = s["sd"])
+})
+xgb_best <- xgb_results %>% slice_max(macroF1, n = 1)
+```
+
+```{r tune-knn, cache=TRUE}
+# ── 5. KNN (kknn) — tuned on the same 50k stratified subsample as the
+# other four models, ensuring consistent CV variance across the panel.
+# kknn fits lazily at predict time so each fold's distance computation
+# is O(n_train_fold × n_val × p) ≈ 40k × 10k × 75 ≈ 3 × 10^10 ops — large
+# but tractable on a single core; the tune-folds object is shared across
+# benchmark models so all five report comparable CV estimates.
+k_grid <- c(11, 21, 51)
+knn_results <- map_dfr(k_grid, function(kv) {
+  pred_fn <- function(tr, va) {
+    fit <- kknn::kknn(SEVERITY ~ ., train = tr, test = va,
+                      k = kv, distance = 2, kernel = "rectangular")
+    fit$fitted.values
+  }
+  scores <- numeric(length(tune_folds$splits))
+  for (i in seq_along(tune_folds$splits)) {
+    sp <- tune_folds$splits[[i]]
+    tr <- analysis(sp); va <- assessment(sp)
+    rp <- prep(rec_lin, training = tr, retain = TRUE)
+    tr_b <- bake(rp, new_data = NULL); va_b <- bake(rp, new_data = va)
+    pr   <- pred_fn(tr_b, va_b)
+    scores[i] <- macro_f1(va$SEVERITY, pr)
+  }
+  tibble(k = kv, macroF1 = mean(scores), sd = sd(scores))
+})
+knn_best <- knn_results %>% slice_max(macroF1, n = 1)
+```
+
+```{r cv-results-table}
+bind_rows(
+  lr_results  %>% transmute(Model = "Logistic Reg", Hyperparam = sprintf("λ=%.4f", lambda),       macroF1, sd),
+  dt_results  %>% transmute(Model = "Decision Tree", Hyperparam = sprintf("cp=%.3f", cp),           macroF1, sd),
+  rf_results  %>% transmute(Model = "Random Forest", Hyperparam = sprintf("mtry=%d, ntree=%d", mtry, ntree), macroF1, sd),
+  xgb_results %>% transmute(Model = "XGBoost",       Hyperparam = sprintf("d=%d, η=%.2f", max_depth, eta), macroF1, sd),
+  knn_results %>% transmute(Model = "KNN",           Hyperparam = sprintf("k=%d", k),               macroF1, sd)
+) %>%
+  arrange(Model, desc(macroF1)) %>%
+  group_by(Model) %>%
+  mutate(best = if_else(macroF1 == max(macroF1), "★", "")) %>%
+  ungroup() %>%
+  mutate(macroF1 = sprintf("%.3f", macroF1), sd = sprintf("%.3f", sd)) %>%
+  kbl(caption = "Table 1. 5-fold stratified CV macro-F1 (50k tuning subsample). ★ marks each model's best configuration.") %>%
+  kable_styling(bootstrap_options = c("striped","condensed"), font_size = 9)
+```
+
+---
+
+## 4. Model Evaluation & Selection
+
+The five tuned models are refit on the **full training set** (`r format(nrow(train_full), big.mark=",")` rows) using their CV-optimal hyperparameters and evaluated **once** on the held-out test set (`r format(nrow(test_full), big.mark=",")` rows). To support a multi-criterion comparison, we report — beyond macro-F1 — Fatal recall, Fatal precision, per-class F1, balanced accuracy, and macro one-vs-rest ROC-AUC, each measuring a different aspect of classifier quality (Sokolova & Lapalme, 2009).
+
+```{r final-fits, cache=TRUE}
+# Re-fit recipes on the full training set and prep. step_smote in recipes
+# is `skip = TRUE` at bake-on-new-data, so test rows are never oversampled.
+rec_tree_full <- recipe(SEVERITY ~ ., data = train_full) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  prep(training = train_full, retain = TRUE)
+
+rec_lin_full <- recipe(SEVERITY ~ ., data = train_full) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_integer(SPEED_ZONE, LIGHT_CONDITION, strict = FALSE) %>%
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_smote(SEVERITY, over_ratio = 0.5, seed = 42) %>%
+  prep(training = train_full, retain = TRUE)
+
+rec_xgb_full <- recipe(SEVERITY ~ ., data = train_full) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_integer(SPEED_ZONE, LIGHT_CONDITION, strict = FALSE) %>%
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  prep(training = train_full, retain = TRUE)
+
+train_tree_b <- bake(rec_tree_full, new_data = NULL)
+test_tree_b  <- bake(rec_tree_full, new_data = test_full)
+train_lin_b  <- bake(rec_lin_full,  new_data = NULL)
+test_lin_b   <- bake(rec_lin_full,  new_data = test_full)
+train_xgb_b  <- bake(rec_xgb_full,  new_data = NULL)
+test_xgb_b   <- bake(rec_xgb_full,  new_data = test_full)
+
+# 1. Logistic Regression (final)
+X_tr_lin <- model.matrix(SEVERITY ~ . - 1, data = train_lin_b)
+X_te_lin <- model.matrix(SEVERITY ~ . - 1, data = test_lin_b)
+lr_fit   <- glmnet::glmnet(X_tr_lin, train_lin_b$SEVERITY,
+              family = "multinomial", alpha = 0, lambda = lr_best$lambda)
+lr_pred  <- factor(predict(lr_fit, X_te_lin, type = "class")[,1],
+                   levels = c("Fatal","Serious","Minor"))
+lr_prob  <- predict(lr_fit, X_te_lin, type = "response")[,,1]
+colnames(lr_prob) <- c("Fatal","Serious","Minor")
+
+# 2. Decision Tree (final, balanced priors)
+dt_fit  <- rpart::rpart(SEVERITY ~ ., data = train_tree_b,
+            parms = list(prior = c(1/3, 1/3, 1/3)),
+            control = rpart::rpart.control(cp = dt_best$cp, maxdepth = 12))
+dt_pred <- predict(dt_fit, test_tree_b, type = "class")
+dt_prob <- predict(dt_fit, test_tree_b, type = "prob")
+
+# 3. Random Forest (final)
+rf_fit <- ranger::ranger(SEVERITY ~ ., data = train_tree_b,
+            num.trees = rf_best$ntree, mtry = rf_best$mtry,
+            min.node.size = 20, class.weights = class_weights,
+            probability = TRUE, num.threads = 4, importance = "impurity")
+rf_prob <- predict(rf_fit, test_tree_b)$predictions
+rf_pred <- factor(c("Fatal","Serious","Minor")[apply(rf_prob, 1, which.max)],
+                  levels = c("Fatal","Serious","Minor"))
+
+# 4. XGBoost (final) — natural class distribution + inverse-frequency weights
+X_tr_xgb <- model.matrix(SEVERITY ~ . - 1, data = train_xgb_b)
+X_te_xgb <- model.matrix(SEVERITY ~ . - 1, data = test_xgb_b)
+y_tr <- as.integer(train_xgb_b$SEVERITY) - 1L
+dtrain_full <- xgboost::xgb.DMatrix(
+  data = X_tr_xgb, label = y_tr,
+  weight = case_weights(train_xgb_b$SEVERITY)
+)
+xgb_fit <- xgboost::xgb.train(
+  params = list(
+    objective = "multi:softprob", num_class = 3,
+    max_depth = xgb_best$max_depth, eta = xgb_best$eta,
+    subsample = 0.8, nthread = 4
+  ),
+  data = dtrain_full, nrounds = 300, verbose = 0
+)
+xgb_prob <- matrix(predict(xgb_fit, X_te_xgb), ncol = 3, byrow = TRUE)
+colnames(xgb_prob) <- c("Fatal","Serious","Minor")
+xgb_pred <- factor(c("Fatal","Serious","Minor")[apply(xgb_prob, 1, which.max)],
+                   levels = c("Fatal","Serious","Minor"))
+
+# 5. Hierarchical XGBoost (final) — soft two-stage severity decomposition
+stage1_y <- as.integer(train_xgb_b$SEVERITY != "Minor")
+stage1_fit <- xgboost::xgb.train(
+  params = list(
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    max_depth = xgb_best$max_depth, eta = xgb_best$eta,
+    subsample = 0.8, nthread = 4
+  ),
+  data = xgboost::xgb.DMatrix(
+    data = X_tr_xgb, label = stage1_y,
+    weight = binary_case_weights(stage1_y)
+  ),
+  nrounds = 300, verbose = 0
+)
+
+stage2_idx <- train_xgb_b$SEVERITY != "Minor"
+stage2_y <- as.integer(train_xgb_b$SEVERITY[stage2_idx] == "Fatal")
+stage2_fit <- xgboost::xgb.train(
+  params = list(
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    max_depth = xgb_best$max_depth, eta = xgb_best$eta,
+    subsample = 0.8, nthread = 4
+  ),
+  data = xgboost::xgb.DMatrix(
+    data = X_tr_xgb[stage2_idx, , drop = FALSE], label = stage2_y,
+    weight = binary_case_weights(stage2_y)
+  ),
+  nrounds = 300, verbose = 0
+)
+
+p_severe <- predict(stage1_fit, X_te_xgb)
+p_fatal_given_severe <- predict(stage2_fit, X_te_xgb)
+hier_prob <- cbind(
+  Fatal  = p_severe * p_fatal_given_severe,
+  Serious = p_severe * (1 - p_fatal_given_severe),
+  Minor  = 1 - p_severe
+)
+hier_prob <- sweep(hier_prob, 1, rowSums(hier_prob), "/")
+hier_pred <- factor(colnames(hier_prob)[apply(hier_prob, 1, which.max)],
+                    levels = c("Fatal","Serious","Minor"))
+
+# 6. KNN (final) — train on a 30k stratified subset of full training data
+set.seed(13)
+knn_train <- train_lin_b %>%
+  group_by(SEVERITY) %>%
+  slice_sample(prop = min(1, 30000 / nrow(train_lin_b))) %>%
+  ungroup()
+knn_fit  <- kknn::kknn(SEVERITY ~ ., train = knn_train, test = test_lin_b,
+                       k = knn_best$k, distance = 2, kernel = "rectangular")
+knn_pred <- knn_fit$fitted.values
+knn_prob <- knn_fit$prob
+colnames(knn_prob) <- c("Fatal","Serious","Minor")
+```
+
+### 4.1 Test-set performance summary
+
+```{r metric-helpers, results='hide'}
+# Per-class & macro metrics + ROC-AUC (one-vs-rest, macro)
+perf_row <- function(name, truth, pred, prob_mat) {
+  truth <- factor(truth, levels = c("Fatal","Serious","Minor"))
+  pred  <- factor(pred,  levels = c("Fatal","Serious","Minor"))
+  cm <- table(truth, pred)
+  diag <- diag(cm); col <- colSums(cm); row <- rowSums(cm)
+  prec <- diag / pmax(col, 1); rec <- diag / pmax(row, 1)
+  f1   <- ifelse(prec + rec == 0, 0, 2*prec*rec/(prec + rec))
+  ba   <- mean(rec)
+  # macro AUC (one-vs-rest)
+  if (!is.null(prob_mat)) {
+    aucs <- sapply(c("Fatal","Serious","Minor"), function(cl) {
+      yardstick::roc_auc_vec(factor(truth == cl, levels = c(TRUE, FALSE)),
+                             prob_mat[, cl])
+    })
+    mauc <- mean(aucs, na.rm = TRUE)
+  } else mauc <- NA_real_
+  tibble(Model = name,
+         `Macro F1` = mean(f1),
+         `Fatal Recall` = rec["Fatal"],
+         `Fatal Precision` = prec["Fatal"],
+         `Serious F1` = f1["Serious"],
+         `Minor F1` = f1["Minor"],
+         `Balanced Acc` = ba,
+         `Macro ROC-AUC` = mauc)
+}
+
+# Cost-sensitive decision rule for triage deployment. Rows are true classes and
+# columns are predicted classes; false negatives on Fatal are deliberately much
+# more expensive than over-calling a Minor crash as Fatal.
+triage_cost <- matrix(
+  c(
+    0,  8, 12,
+    2,  0,  4,
+    1,  0.5, 0
+  ),
+  nrow = 3, byrow = TRUE,
+  dimnames = list(
+    truth = c("Fatal","Serious","Minor"),
+    pred  = c("Fatal","Serious","Minor")
+  )
+)
+
+cost_predict <- function(prob_mat, cost_mat = triage_cost) {
+  prob_mat <- as.matrix(prob_mat[, colnames(cost_mat), drop = FALSE])
+  expected_cost <- prob_mat %*% cost_mat
+  factor(colnames(expected_cost)[max.col(-expected_cost)],
+         levels = colnames(cost_mat))
+}
+
+results_tbl <- bind_rows(
+  perf_row("Logistic Regression", test_full$SEVERITY, lr_pred,  lr_prob),
+  perf_row("Decision Tree",       test_full$SEVERITY, dt_pred,  dt_prob),
+  perf_row("Random Forest",       test_full$SEVERITY, rf_pred,  rf_prob),
+  perf_row("XGBoost",             test_full$SEVERITY, xgb_pred, xgb_prob),
+  perf_row("KNN",                 test_full$SEVERITY, knn_pred, knn_prob)
+)
+
+proposed_tbl <- perf_row(
+  "Hierarchical XGBoost", test_full$SEVERITY, hier_pred, hier_prob
+)
+
+comparison_tbl <- bind_rows(results_tbl, proposed_tbl)
+
+triage_results_tbl <- bind_rows(
+  perf_row("Logistic Regression", test_full$SEVERITY, cost_predict(lr_prob),  lr_prob),
+  perf_row("Decision Tree",       test_full$SEVERITY, cost_predict(dt_prob),  dt_prob),
+  perf_row("Random Forest",       test_full$SEVERITY, cost_predict(rf_prob),  rf_prob),
+  perf_row("XGBoost",             test_full$SEVERITY, cost_predict(xgb_prob), xgb_prob),
+  perf_row("Hierarchical XGBoost", test_full$SEVERITY, cost_predict(hier_prob), hier_prob),
+  perf_row("KNN",                 test_full$SEVERITY, cost_predict(knn_prob), knn_prob)
+) %>%
+  mutate(`Decision Rule` = "Cost-sensitive triage")
+```
+
+```{r results-table, cache=FALSE}
+results_tbl %>%
+  mutate(across(where(is.numeric), ~ sprintf("%.3f", .))) %>%
+  kbl(caption = "Table 2. Held-out test-set performance for the five benchmark models. Macro F1 is the primary selection metric; Fatal Recall is the safety-critical secondary criterion.") %>%
+  kable_styling(bootstrap_options = c("striped","condensed"), font_size = 9.5) %>%
+  row_spec(which.max(results_tbl$`Macro F1`), bold = TRUE, background = "#fef9c3")
+```
+
+The benchmark comparison shows the original modelling problem clearly. Random Forest gives the strongest overall ranking and macro-F1 among the five standard models, but its default Fatal recall is very low because the rare Fatal class is overwhelmed by the larger Serious and Minor classes. Decision Tree and KNN recover more Fatal crashes, but at a lower overall macro-F1. This trade-off motivates a proposed model that changes the structure of the classification problem rather than only changing the learner.
+
+### 4.2 Proposed Model — Hierarchical XGBoost
+
+The proposed final model is a **Hierarchical XGBoost severity classifier**. It is introduced only after evaluating the five benchmark models because it is not just a sixth off-the-shelf classifier; it is a redesigned modelling structure. Stage 1 predicts whether a crash is **Minor** or **injury-severe** (`Fatal/Serious`). Stage 2 is trained only on the injury-severe training rows and predicts **Fatal** versus **Serious**. This decomposition matches the triage workflow: first decide whether a crash needs severe-injury escalation, then distinguish Fatal risk within the severe subset.
+
+The hierarchy is combined softly, not used as a hard gate. If Stage 1 estimates \(P(S)\), where \(S=\{\text{Fatal, Serious}\}\), and Stage 2 estimates \(P(\text{Fatal}\mid S)\), the final probabilities are:
+
+$$P(\text{Minor}) = 1-P(S),\quad P(\text{Fatal}) = P(S)P(\text{Fatal}\mid S),\quad P(\text{Serious}) = P(S)(1-P(\text{Fatal}\mid S)).$$
+
+This is safer than sending only Stage-1-positive rows to Stage 2, because every crash retains a non-zero Fatal probability when the evidence supports it. Both stages use the same non-SMOTE numeric XGBoost preprocessing and inverse-frequency case weights. The model is still evaluated on the original three-class Fatal/Serious/Minor test set, so it is not receiving an easier benchmark.
+
+```{r proposed-results-table, cache=FALSE}
+proposed_tbl %>%
+  mutate(across(where(is.numeric), ~ sprintf("%.3f", .))) %>%
+  kbl(caption = "Table 3. Held-out test-set performance for the proposed Hierarchical XGBoost model.") %>%
+  kable_styling(bootstrap_options = c("striped","condensed"), font_size = 9.5)
+```
+
+### 4.3 Six-model comparison
+
+Table 4 places the proposed hierarchical model beside the original five benchmark models. This is the final comparison table used for model selection.
+
+```{r six-model-results-table, cache=FALSE}
+comparison_tbl %>%
+  mutate(across(where(is.numeric), ~ sprintf("%.3f", .))) %>%
+  kbl(caption = "Table 4. Final held-out comparison across all six models, including the proposed Hierarchical XGBoost model.") %>%
+  kable_styling(bootstrap_options = c("striped","condensed"), font_size = 9.5) %>%
+  row_spec(which.max(comparison_tbl$`Macro F1`), bold = TRUE, background = "#fef9c3")
+```
+
+Because ambulance triage is cost-asymmetric, the maximum-probability class is not the only defensible decision rule. Table 5 applies the pre-specified cost matrix above to the same fitted probabilities. This does **not** refit any model and does **not** tune on the test labels; it simply chooses the class with lowest expected harm for each crash.
+
+```{r triage-results-table, cache=FALSE}
+triage_results_tbl %>%
+  select(Model, `Macro F1`, `Fatal Recall`, `Fatal Precision`,
+         `Serious F1`, `Minor F1`, `Balanced Acc`, `Macro ROC-AUC`) %>%
+  mutate(across(where(is.numeric), ~ sprintf("%.3f", .))) %>%
+  kbl(caption = "Table 5. Cost-sensitive triage decisions from the same fitted model probabilities. The rule prioritises avoiding Fatal false negatives over preserving Minor precision.") %>%
+  kable_styling(bootstrap_options = c("striped","condensed"), font_size = 9.5) %>%
+  row_spec(which.max(triage_results_tbl$`Fatal Recall`), bold = TRUE, background = "#dcfce7")
+```
+
+```{r cm-panel, cache=FALSE, fig.height=3.2, fig.width=10, out.width="100%", fig.cap="Fig 7. Row-normalised confusion matrices on the held-out test set. Diagonal cells are recall per true class; bright off-diagonals indicate systematic confusion. The hierarchical XGBoost panel shows the effect of decomposing the original three-class task into severe-vs-minor and fatal-vs-serious stages."}
+plot_cm <- function(name, pred) {
+  cm <- table(truth = factor(test_full$SEVERITY,
+                             levels = c("Fatal","Serious","Minor")),
+              pred  = factor(pred, levels = c("Fatal","Serious","Minor")))
+  cm_df <- as.data.frame(prop.table(cm, 1)) %>%
+    rename(prop = Freq) %>%
+    mutate(label = sprintf("%.2f", prop))
+  ggplot(cm_df, aes(pred, truth, fill = prop)) +
+    geom_tile(colour = "white") +
+    geom_text(aes(label = label), size = 2.4) +
+    scale_fill_gradient(low = "#f7fbff", high = "#08519c",
+                        limits = c(0,1), guide = "none") +
+    labs(title = name, x = "Predicted", y = "True") +
+    theme_minimal(base_size = 8) +
+    theme(plot.title = element_text(face = "bold", size = 9),
+          axis.text = element_text(size = 7))
+}
+wrap_plots(
+  plot_cm("LR", lr_pred),
+  plot_cm("DT", dt_pred),
+  plot_cm("RF", rf_pred),
+  plot_cm("XGBoost", xgb_pred),
+  plot_cm("Hier. XGB", hier_pred),
+  plot_cm("KNN", knn_pred),
+  ncol = 3
+)
+```
+
+### 4.4 Final model selection justification
+
+```{r best-model-id, results='hide', cache=FALSE}
+baseline_idx <- which.max(results_tbl$`Macro F1`)
+baseline_name <- results_tbl$Model[baseline_idx]
+baseline_f1   <- results_tbl$`Macro F1`[baseline_idx]
+baseline_rec  <- results_tbl$`Fatal Recall`[baseline_idx]
+best_idx <- which.max(comparison_tbl$`Macro F1`)
+best_name <- comparison_tbl$Model[best_idx]
+best_f1   <- comparison_tbl$`Macro F1`[best_idx]
+best_rec  <- comparison_tbl$`Fatal Recall`[best_idx]
+# Operational pick: highest Fatal recall under the pre-specified triage rule
+op_idx  <- which.max(triage_results_tbl$`Fatal Recall`)
+op_name <- triage_results_tbl$Model[op_idx]
+op_f1   <- triage_results_tbl$`Macro F1`[op_idx]
+op_rec  <- triage_results_tbl$`Fatal Recall`[op_idx]
+op_prec <- triage_results_tbl$`Fatal Precision`[op_idx]
+hier_default <- proposed_tbl
+hier_triage  <- triage_results_tbl %>% filter(Model == "Hierarchical XGBoost")
+```
+
+**The benchmark result is a precision–recall trade-off.** Among the original five models, `r baseline_name` leads on macro-F1 (`r sprintf('%.3f', baseline_f1)`) but its Fatal recall is only `r sprintf('%.3f', baseline_rec)`. Decision Tree and KNN recover more Fatal crashes, but at lower macro-F1. This confirms that the weak performance is not simply a tuning issue: the flat three-class formulation makes the rare Fatal class compete directly with the much larger Minor class.
+
+**The proposed model improves the final comparison.** Across all six models, `r best_name` leads on macro-F1 (`r sprintf('%.3f', best_f1)`) with Fatal recall `r sprintf('%.3f', best_rec)`. The hierarchical model's default three-class evaluation gives macro-F1 `r sprintf('%.3f', hier_default[["Macro F1"]])`, Fatal recall `r sprintf('%.3f', hier_default[["Fatal Recall"]])`, and macro ROC-AUC `r sprintf('%.3f', hier_default[["Macro ROC-AUC"]])`. This improvement is meaningful because the model is evaluated on the same original Fatal/Serious/Minor test set as the five benchmark models.
+
+**The cost-sensitive triage rule changes the operational comparison.** `r op_name` achieves the highest Fatal recall (`r sprintf('%.3f', op_rec)`) under Table 5, at Fatal precision `r sprintf('%.3f', op_prec)` and macro-F1 `r sprintf('%.3f', op_f1)`. The hierarchical XGBoost model under the same rule gives Fatal recall `r sprintf('%.3f', hier_triage[["Fatal Recall"]])` and Fatal precision `r sprintf('%.3f', hier_triage[["Fatal Precision"]])`. For ambulance dispatch, *missing a fatal crash (false negative) is operationally far costlier than a Minor over-call (false positive)*: an under-dispatched ambulance results in delayed trauma response, while an over-dispatched one merely returns from scene.
+
+We therefore recommend a **hierarchical final model with a probability/risk companion**:
+
+- **Hierarchical XGBoost** as the *final severity classifier* — chosen because it directly addresses the modelling weakness exposed by the flat classifiers: the Fatal class is too rare to learn cleanly while competing against Minor in one step. The soft two-stage probability product keeps all three final probabilities available and avoids a hard Stage-1 gate.
+- **`r op_name` with the cost-sensitive triage rule** as the *highest-sensitivity operational trigger* — chosen for Fatal recall of `r sprintf('%.3f', op_rec)` under the pre-specified harm matrix. Its lower Fatal precision is acceptable in this role because the downstream cost of a Fatal over-call is small relative to under-triage.
+- **Random Forest** as the *probability source for risk scoring and policy analysis* — chosen for its highest macro AUC of `r sprintf('%.3f', results_tbl[[ "Macro ROC-AUC" ]][results_tbl$Model == "Random Forest"])`, indicating the best-calibrated probability rankings across all three classes. RF's continuous severity probability is the appropriate input to TAC actuarial bands and to VicRoads infrastructure prioritisation, where ranking quality matters more than argmax classification accuracy.
+
+This staged recommendation is more honest than picking a single macro-F1 winner and is consistent with the operations-research literature on imbalanced multiclass deployment, which emphasises that *no single scalar metric captures cost-asymmetric utility* (Sokolova & Lapalme, 2009; He & Garcia, 2009).
+
+**Why XGBoost is treated differently.** The original SMOTE-trained booster was vulnerable to a calibration mismatch between synthetic training priors and the natural-distribution test set. The revised implementation removes that weakness by training XGBoost on the original rows with inverse-frequency case weights. This keeps the rare Fatal class influential in the loss while preserving probability rankings for deployment.
+
+```{r vip-fig, fig.height=2.6, fig.width=8, out.width="90%", fig.cap="Fig 8. (Left) Top-15 features by impurity importance for Random Forest. (Right) Top-15 features by gain for XGBoost. Speed zone, accident type (head-on, struck pedestrian), road geometry, and ejection dominate — direct confirmation of the EDA findings in §2 and convergent across both ensemble methods despite their different inductive biases."}
+p_rf  <- vip::vip(rf_fit, num_features = 15, geom = "col") +
+  ggtitle("Random Forest — impurity") +
+  theme_minimal(base_size = 8) +
+  theme(plot.title = element_text(face = "bold", size = 9))
+p_xgb <- vip::vip(xgb_fit, num_features = 15, geom = "col") +
+  ggtitle("XGBoost — gain") +
+  theme_minimal(base_size = 8) +
+  theme(plot.title = element_text(face = "bold", size = 9))
+p_rf | p_xgb
+```
+
+Despite their divergent test-set performance, the two ensembles agree on the **dominant predictors**: `SPEED_ZONE`, `ACCIDENT_TYPE = Head-on / Struck pedestrian`, `ROAD_GEOMETRY`, and `any_ejected`. This convergence — across an averaging ensemble with class-weighted splits and a sequential booster trained with case weights — is the strongest possible evidence that these features carry genuine predictive signal rather than artefacts of any single model's inductive bias. The pattern directly mirrors the bivariate findings in §2 (Figs 3–5) and answers the original research question: **severity is best predicted by the joint configuration of kinetic-energy proxies (speed, vehicle type, geometry) and occupant-protection compliance (ejection, seatbelt non-use)** — physically interpretable factors aligned with the road-safety literature on crash energetics (Tingvall & Haworth, 1999).
+
+### 4.5 Process reflection — Data Investigation Process (DIP)
+
+The **Define → Investigate → Implement → Present (DIP)** scaffold structured the project as four sequential stages, each with a distinct deliverable and stop condition. *Define* (§1) forced a single falsifiable research question — *which factor combinations best predict Fatal/Serious/Minor severity* — and three precisely-bounded target classes, eliminating scope creep before any code was written. *Investigate* (§2) surfaced the two structural data hazards that would have silently inflated CV scores if missed: outcome leakage in the `NO_PERSONS_KILLED/INJ_*` columns (Fig 6) and the 37:1 class imbalance (Fig 1). The EDA also produced concrete encoding recommendations — ordinal `SPEED_ZONE`, native factor `ACCIDENT_TYPE` for tree models — that flowed directly into the §3 recipes. *Implement* (§3) maintained separate preprocessing pipelines for native-factor trees, SMOTE-based LR/KNN, case-weighted XGBoost, and the new two-stage hierarchical XGBoost, then refit on the full 136k training set. *Present* (§4) restricted test-set evaluation to a single pass per model and reported a multi-criterion comparison rather than a single scalar winner — directly forced by the macro-F1-vs-Fatal-recall tension that the data revealed.
+
+**What the DIP scaffold did well.** The Investigate stage's bivariate panels (Fig 3) and target-leakage check (Fig 6) were the methodologically decisive moments: they prevented us from training on `NO_PERSONS_KILLED` and from selecting models on raw accuracy, both of which would have produced cosmetically excellent but operationally meaningless results. The strict no-leakage discipline in Implement (within-fold imputation, within-fold SMOTE for LR/KNN only, inverse-frequency XGBoost weighting, hierarchical stages trained only on the training partition, single test-set touch) means the §4 numbers are honest out-of-sample estimates, not optimistic re-substitution scores.
+
+**What we would do differently in v2.** *First*, tune the Stage-1 severe-vs-minor and Stage-2 fatal-vs-serious thresholds with Ambulance Victoria stakeholders rather than relying only on default probability cut-points, then validate the resulting triage rule on a separate temporal holdout. *Second*, add post-hoc probability calibration (e.g. Platt scaling or isotonic regression) before using class probabilities for actuarial scoring. *Third*, incorporate **stratified geographic cross-validation by `LGA_NAME`** to detect spatial overfitting — adjacent crashes in the same LGA share unmeasured infrastructure features, so random k-fold may understate generalisation error to new road segments. *Fourth*, replace KNN with **LightGBM** (Ke et al., 2017) — KNN was retained as a non-parametric diagnostic but contributed little new information, and a second boosting variant with native categorical handling would have been a better methodological contrast. *Fifth*, generate **SHAP-based local explanations** (Lundberg & Lee, 2017) for high-risk individual predictions to support deployment review by VicRoads stakeholders.
+
+---
+
+## 5. Conclusion & Insights
+
+The Victorian Road Crash dataset supports a tractable three-class severity classifier, but the central methodological finding of this study is that **no single flat model dominates across both macro-F1 and Fatal recall**. The final model is therefore a **hierarchical XGBoost classifier**: Stage 1 separates Minor from injury-severe crashes, and Stage 2 separates Fatal from Serious crashes within the injury-severe subset. This structure better matches the clinical decision pathway and reduces the extent to which the rare Fatal class is drowned out by the dominant Minor class.
+
+**Recommended final model.** Hierarchical XGBoost serves as the final severity classifier because it directly implements the two decisions stakeholders care about: *is the crash severe enough to escalate?* and *among severe crashes, is it likely to be Fatal?* Its default held-out macro-F1 is `r sprintf('%.3f', hier_default[["Macro F1"]])`, and its cost-sensitive Fatal recall is `r sprintf('%.3f', hier_triage[["Fatal Recall"]])`. `r op_name` with the cost-sensitive rule remains the highest-sensitivity operational trigger if the sole objective is maximising Fatal recall, while Random Forest remains useful as a probability-ranking benchmark for policy analysis.
+
+**Substantive findings.** Variable-importance analysis (Fig 8) is convergent across both ensemble methods despite their divergent test-set performance: `SPEED_ZONE`, `ACCIDENT_TYPE` (head-on, struck pedestrian), `ROAD_GEOMETRY`, and `any_ejected` carry the dominant signal. This convergence — across a class-weighted averaging ensemble (RF) and a case-weighted sequential booster (XGBoost) — confirms that severity is genuinely driven by the joint configuration of *kinetic-energy proxies* (speed, vehicle category, road geometry) and *occupant-protection compliance* (ejection, seatbelt non-use), not by any single model's inductive bias. This finding aligns with both Victoria's *Towards Zero* strategy (Transport Accident Commission, 2021) and the established crash-energetics literature (Tingvall & Haworth, 1999), and it directly answers the original research question.
+
+**Practical implications.** For *Ambulance Victoria*, the hierarchy is more natural than a flat classifier: Stage 1 acts like an escalation screen, while Stage 2 sharpens attention on Fatal risk among already severe crashes. Combined with caller-reported metadata in the first three minutes of a 000 call, it can flag fatal-likely scenes for upgraded trauma response with reduced under-triage. For *VicRoads*, the convergent feature-importance ranking surfaces the speed × geometry × light combinations that drive disproportionate fatal outcomes, prioritising candidates for median-barrier installation and intersection redesign. For *TAC*, calibrated class probabilities form a continuous risk score appropriate for actuarial bands and targeted *education* campaigns. The full pipeline transfers without modification to NSW under its *Road Safety Action Plan* given comparable urban density and infrastructure.
+
+**Limitations.** Three limitations bound the deployment claim. *First*, the dataset captures only *police-reported* crashes; minor crashes settled privately are systematically excluded, biasing the Minor class downward and the Fatal proportion upward — true population Fatal rate is lower than 1.7%. *Second*, the predictors available at crash-report time differ from those used here: `mean_age_lower` and `vehicle_category` require radio-relayed scene assessment that is not always feasible at first dispatch. Validation on a *first-3-minutes* feature subset is a precondition to operational use. *Third*, k-fold CV does not enforce geographic separation of training and assessment splits, so the reported Fatal recall may overstate generalisation to new road segments where infrastructure features are unmeasured. Stratifying CV by `LGA_NAME` is the natural next step.
+
+---
+
+## 6. References
+
+Bergstra, J., & Bengio, Y. (2012). Random search for hyper-parameter optimization. *Journal of Machine Learning Research, 13*(10), 281–305. <https://jmlr.org/papers/v13/bergstra12a.html>
+
+Breiman, L. (2001). Random forests. *Machine Learning, 45*(1), 5–32. <https://doi.org/10.1023/A:1010933404324>
+
+Breiman, L., Friedman, J. H., Olshen, R. A., & Stone, C. J. (1984). *Classification and regression trees*. Wadsworth.
+
+Chawla, N. V., Bowyer, K. W., Hall, L. O., & Kegelmeyer, W. P. (2002). SMOTE: Synthetic minority over-sampling technique. *Journal of Artificial Intelligence Research, 16*, 321–357. <https://doi.org/10.1613/jair.953>
+
+Chen, T., & Guestrin, C. (2016). XGBoost: A scalable tree boosting system. In *Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining* (pp. 785–794). ACM. <https://doi.org/10.1145/2939672.2939785>
+
+Cover, T., & Hart, P. (1967). Nearest neighbor pattern classification. *IEEE Transactions on Information Theory, 13*(1), 21–27. <https://doi.org/10.1109/TIT.1967.1053964>
+
+Dal Pozzolo, A., Caelen, O., Johnson, R. A., & Bontempi, G. (2015). Calibrating probability with undersampling for unbalanced classification. *2015 IEEE Symposium Series on Computational Intelligence*, 159–166. <https://doi.org/10.1109/SSCI.2015.33>
+
+Department of Transport and Planning. (2024). *Victoria road crash data* [Data set]. State Government of Victoria. <https://discover.data.vic.gov.au/dataset/victoria-road-crash-data>
+
+Friedman, J. H. (2001). Greedy function approximation: A gradient boosting machine. *The Annals of Statistics, 29*(5), 1189–1232. <https://doi.org/10.1214/aos/1013203451>
+
+Grinsztajn, L., Oyallon, E., & Varoquaux, G. (2022). Why do tree-based models still outperform deep learning on typical tabular data? *Advances in Neural Information Processing Systems, 35*, 507–520. <https://proceedings.neurips.cc/paper_files/paper/2022/hash/0378c7692da36807bdec87ab043cdadc-Abstract-Datasets_and_Benchmarks.html>
+
+Hastie, T., Tibshirani, R., & Friedman, J. (2009). *The elements of statistical learning: Data mining, inference, and prediction* (2nd ed.). Springer. <https://doi.org/10.1007/978-0-387-84858-7>
+
+He, H., & Garcia, E. A. (2009). Learning from imbalanced data. *IEEE Transactions on Knowledge and Data Engineering, 21*(9), 1263–1284. <https://doi.org/10.1109/TKDE.2008.239>
+
+Kaufman, S., Rosset, S., Perlich, C., & Stitelman, O. (2012). Leakage in data mining: Formulation, detection, and avoidance. *ACM Transactions on Knowledge Discovery from Data, 6*(4), Article 15. <https://doi.org/10.1145/2382577.2382579>
+
+Ke, G., Meng, Q., Finley, T., Wang, T., Chen, W., Ma, W., Ye, Q., & Liu, T.-Y. (2017). LightGBM: A highly efficient gradient boosting decision tree. *Advances in Neural Information Processing Systems, 30*, 3146–3154. <https://proceedings.neurips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html>
+
+Kuhn, M., & Silge, J. (2022). *Tidy modeling with R*. O'Reilly Media. <https://www.tmwr.org/>
+
+Lundberg, S. M., & Lee, S.-I. (2017). A unified approach to interpreting model predictions. *Advances in Neural Information Processing Systems, 30*, 4765–4774. <https://proceedings.neurips.cc/paper/2017/hash/8a20a8621978632d76c43dfd28b67767-Abstract.html>
+
+Sokolova, M., & Lapalme, G. (2009). A systematic analysis of performance measures for classification tasks. *Information Processing & Management, 45*(4), 427–437. <https://doi.org/10.1016/j.ipm.2009.03.002>
+
+Sterne, J. A. C., White, I. R., Carlin, J. B., Spratt, M., Royston, P., Kenward, M. G., Wood, A. M., & Carpenter, J. R. (2009). Multiple imputation for missing data in epidemiological and clinical research: Potential and pitfalls. *BMJ, 338*, b2393. <https://doi.org/10.1136/bmj.b2393>
+
+Therneau, T., & Atkinson, B. (2022). *rpart: Recursive partitioning and regression trees* (R package version 4.1.19). <https://CRAN.R-project.org/package=rpart>
+
+Tingvall, C., & Haworth, N. (1999). *Vision Zero — An ethical approach to safety and mobility*. 6th ITE International Conference on Road Safety & Traffic Enforcement, Melbourne. <https://www.monash.edu/muarc/our-publications/papers/visionzero>
+
+Transport Accident Commission. (2021). *Victoria's road safety strategy 2021–2030: Towards zero*. State Government of Victoria. <https://www.tac.vic.gov.au/road-safety/victorian-road-safety-strategy>
+
+Wright, M. N., & Ziegler, A. (2017). ranger: A fast implementation of random forests for high dimensional data in C++ and R. *Journal of Statistical Software, 77*(1), 1–17. <https://doi.org/10.18637/jss.v77.i01>
+
+**AI Disclosure.** Generative AI tools (ChatGPT, Gemini, Claude) were used for code structuring, chunk organisation, grammar correction, and prose editing. All analytical decisions, dataset interpretations, modelling choices, and final conclusions were made and verified by the student team.

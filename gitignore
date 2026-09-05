@@ -1,0 +1,17 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Knitr cache (this Rmd uses cache=TRUE)
+*_cache/
+*_files/.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large raw data (add your dataset filename here if you keep it out of git)
+# data/victoria_road_crash_raw.csv
