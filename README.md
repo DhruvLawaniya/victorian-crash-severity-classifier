@@ -2,7 +2,7 @@
 
 A tidymodels-based analysis of the Victorian road crash dataset that predicts whether a crash results in a **Fatal**, **Serious**, or **Minor** injury outcome, using environmental, vehicle, and human factors. The final model is a **hierarchical XGBoost classifier** (Stage 1: Minor vs. Severe, Stage 2: Fatal vs. Serious among Severe crashes).
 
-**[View the full report](https://YOUR-USERNAME.github.io/YOUR-REPO-NAME/)**
+**[View the full report](https://dhruvlawaniya.github.io/victorian-crash-severity-classifier/)**
 
 ## Overview
 
