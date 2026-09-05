@@ -50,14 +50,3 @@ rmarkdown::render("eda_victoria_crash.Rmd", output_file = "index.html")
 
 The Victoria Road Crash dataset is not bundled in this repo (check licence/size before adding it) — download it from the [Victorian Government open data portal](https://discover.data.vic.gov.au/dataset/victoria-road-crash-data) and update the data-loading chunk in `eda_victoria_crash.Rmd` with your local path.
 
-## Team
-
-W05G09
-
-## AI Disclosure
-
-Generative AI tools (ChatGPT, Gemini, Claude) were used for code structuring, chunk organisation, grammar correction, and prose editing. All analytical decisions, dataset interpretations, modelling choices, and final conclusions were made and verified by the student team.
-
-## References
-
-See Section 6 of the report (`eda_victoria_crash.Rmd` / rendered HTML) for the full reference list, including Chen & Guestrin (2016), Breiman (2001), Chawla et al. (2002), and the Transport Accident Commission's *Towards Zero* strategy.
